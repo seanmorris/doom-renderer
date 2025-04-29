@@ -5,7 +5,9 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls'
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
 import { Wad, WadLoader } from 'doom-parser/Wad.mjs'
 import DOOM from './DOOM1.GL.WAD';
-import HACKED from './hacked.wad';
+// import HACKED from './hacked.gl.wad';
+// import FREEDOOM from './freedoom1.gl.wad';
+// import SKULLTAG from './Skulltag-v097d5.gl.wad';
 
 let camera, scene, renderer, light, controls;
 let moveForward = false;
@@ -123,12 +125,30 @@ async function setup()
 	const query = new URLSearchParams(location.search);
 
 	// wad = new Wad(DOOM);
-	// console.log(wad.findMaps());
+
 	wad = new WadLoader(
 		await (await fetch(DOOM)).arrayBuffer(),
-		await (await fetch(HACKED)).arrayBuffer(),
+		// await (await fetch(HACKED)).arrayBuffer(),
+		// await (await fetch(FREEDOOM)).arrayBuffer(),
+		// await (await fetch(SKULLTAG)).arrayBuffer(),
 	);
-	map = wad.loadMap(query.has('map') ? query.get('map') : 'E1M1');
+
+	const mapsNames = wad.findMaps();
+
+	if(!mapsNames.length)
+	{
+		throw new Error('No maps found.');
+	}
+
+	const selectedMap = query.has('map') ? query.get('map') : mapsNames[0];
+
+	if(!mapsNames.includes(selectedMap))
+	{
+		throw new Error(`Map ${selectedMap} not found.`);
+	}
+
+	map = wad.loadMap(selectedMap);
+
 	const bounds = map.bounds;
 
 	const lightLevel = 0;
@@ -154,7 +174,7 @@ async function setup()
 		playerStart = {x, y, z, angle: 90 + angle};
 	}
 
-	// Camera.
+	// Camera
 	// const fov    = 67.5;
 	const fov    = 45;
 	const aspect = window.innerWidth / window.innerHeight;
@@ -171,7 +191,7 @@ async function setup()
 			, bounds.yMax - (playerStart.y - bounds.yMin)
 		);
 
-		camera.rotation.y = (Math.PI / 2) * ((90 + -playerStart.angle) / 90);
+		camera.rotation.y = (Math.PI / 2) * ((-90 + playerStart.angle) / 90);
 	}
 	else
 	{
@@ -279,8 +299,8 @@ async function setup()
 		const rSector = map.sector(right.sector);
 		const lSector = left && map.sector(left.sector);
 
-		const rLight = 32 - Math.trunc(rSector.lightLevel / 8);
-		const lLight = lSector && (32 - Math.trunc(lSector.lightLevel / 8));
+		const rLight = (33 - Math.trunc(rSector.lightLevel / 8));
+		const lLight = lSector && (33 - Math.trunc(lSector.lightLevel / 8));
 
 		const rSky = rSector.ceilingFlat === 'F_SKY1';
 		const lSky = lSector.ceilingFlat === 'F_SKY1';
@@ -621,7 +641,7 @@ async function setup()
 		const glSubsector = map.glSubsector(i);
 		const sector = map.sector(glSubsector.sector);
 
-		const lightLevel = 32 - Math.trunc(sector.lightLevel / 8);
+		const lightLevel = 33 - Math.trunc(sector.lightLevel / 8);
 
 		const original = glSubsector.vertexes();
 		const vertexes = original.map(v => flipVertex(map, v));
@@ -631,8 +651,10 @@ async function setup()
 		const floorShape = new THREE.Shape(Vector2s);
 		const ceilingShape = new THREE.Shape(backward);
 
-		const floorFlat = wad.flat(sector.floorFlat);
-		const ceilingFlat = wad.flat(sector.ceilingFlat);
+		const loader = wad.loader || wad;
+
+		const floorFlat   = loader.flat(sector.floorFlat);
+		const ceilingFlat = loader.flat(sector.ceilingFlat);
 
 		const floorGeometry = new THREE.ShapeGeometry(floorShape);
 		floorGeometry.setAttribute('position', new THREE.Float32BufferAttribute(
@@ -726,29 +748,12 @@ async function setup()
 			ceiling.userData.frames = frames;
 		}
 
+		const unflipped = unflipVertex(map, {x: bounds.xMin, y: bounds.yMin});
+
 		let xfOffset = 0;
-		let yfOffset = 0;
 		let xcOffset = 0;
-		let ycOffset = 0;
-
-		const offsetPrefixes = [
-			'CEIL4_3', 'DEM1_',  'TLITE6_1'
-		];
-
-		for(const offsetPrefix of offsetPrefixes)
-		{
-			if(sector.floorFlat.substr(0, offsetPrefix.length) === offsetPrefix)
-			{
-				yfOffset = 32;
-				break;
-			}
-
-			if(sector.ceilingFlat.substr(0, offsetPrefix.length) === offsetPrefix)
-			{
-				ycOffset = 32;
-				break;
-			}
-		}
+		let yfOffset = map.bounds.height % 64;
+		let ycOffset = map.bounds.height % 64;
 
 		setUV(floorGeometry, xfOffset, yfOffset);
 		setUV(ceilingGeometry, xcOffset, ycOffset);

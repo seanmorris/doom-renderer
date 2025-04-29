@@ -14,9 +14,7 @@ const module = {
 		},
 		{
 			test: /\.WAD$/i,
-			use: [{
-				loader: 'arraybuffer-loader',
-			}],
+			type: 'asset/resource'
 		},
 	]
 };
@@ -30,9 +28,15 @@ const plugins = [
 
 const devServer = {
 	static: {
-		directory: path.resolve(fileURLToPath(import.meta.url), './src'),
+		directory: path.resolve(fileURLToPath(import.meta.url), '../src'),
 		publicPath: '/src'
 	}
 };
 
-export default {module, plugins, devServer};
+const output = {
+	path: path.resolve(fileURLToPath(import.meta.url), '../docs'), // build to /docs for github pages
+	filename: '[name].bundle.js',
+	clean: true,
+};
+
+export default {module, plugins, devServer, output};

@@ -3,9 +3,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls'
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
-import { Wad } from 'doom-parser/Wad.mjs'
+import { Wad, WadLoader } from 'doom-parser/Wad.mjs'
 import DOOM from './DOOM1.GL.WAD';
-import { cameraPosition } from 'three/tsl';
+import HACKED from './hacked.wad';
 
 let camera, scene, renderer, light, controls;
 let moveForward = false;
@@ -14,7 +14,7 @@ let moveLeft = false;
 let moveRight = false;
 let moveUp = false;
 let moveDown = false;
-let map;
+let wad, map;
 let yCam = 0;
 let yVel = 0;
 
@@ -87,15 +87,23 @@ function lineIntersectsLine(x1a, y1a, x2a, y2a, x1b, y1b, x2b, y2b)
 const sectorLinedefs = new Map;
 const linedefPlanes = new Map;
 
-const loadTexture = async (wad, name) => {
-	const wadTexture = wad.texture(name);
+const loadTexture = async (wad, name, lightLevel) => {
+	const wadTexture = wad.texture(name.toUpperCase());
 
 	if(wadTexture)
 	{
-		return [textureLoader.load(await wadTexture.decode()), wadTexture];
+		const texture = textureLoader.load(await wadTexture.decode(lightLevel));
+
+		texture.userData.wadTexture = wadTexture
+		texture.magFilter = THREE.NearestFilter;
+		texture.wrapS = THREE.RepeatWrapping;
+		texture.wrapT = THREE.RepeatWrapping;
+		texture.colorSpace = THREE.SRGBColorSpace;
+
+		return texture;
 	}
 
-	return [textureLoader.load('https://threejs.org/examples/textures/crate.gif'), null];
+	return textureLoader.load('https://threejs.org/examples/textures/crate.gif');
 }
 
 const isTextureName = name => {
@@ -105,20 +113,25 @@ const isTextureName = name => {
 		&& name !== 'AASHITTY';
 }
 
+const animatedWalls = new Set;
+const animatedFlats = new Set;
+
 async function setup()
 {
 	console.time('setup');
 
 	const query = new URLSearchParams(location.search);
 
-	// Map
-	const wad = new Wad(DOOM);
-	map = wad.loadMap(query.has('map') ? query.get('map') : 'E1M6');
+	// wad = new Wad(DOOM);
+	// console.log(wad.findMaps());
+	wad = new WadLoader(
+		await (await fetch(DOOM)).arrayBuffer(),
+		await (await fetch(HACKED)).arrayBuffer(),
+	);
+	map = wad.loadMap(query.has('map') ? query.get('map') : 'E1M1');
 	const bounds = map.bounds;
 
-	console.log(map.blockmapOrigin);
-	console.log(map.blockCount);
-	console.log(map.name);
+	const lightLevel = 0;
 
 	let playerStart = {x:0, y:0, z:0, angle: 0};
 
@@ -141,8 +154,8 @@ async function setup()
 		playerStart = {x, y, z, angle: 90 + angle};
 	}
 
-
 	// Camera.
+	// const fov    = 67.5;
 	const fov    = 45;
 	const aspect = window.innerWidth / window.innerHeight;
 	const near   = 0.1;
@@ -185,6 +198,7 @@ async function setup()
 
 	// Scene.
 	scene = new THREE.Scene();
+
 	scene.add( controls.object );
 
 	const onKeyDown = event => {
@@ -243,27 +257,33 @@ async function setup()
 		}
 	};
 
-	document.addEventListener( 'keydown', onKeyDown );
-	document.addEventListener( 'keyup', onKeyUp );
+	document.addEventListener('keydown', onKeyDown);
+	document.addEventListener('keyup', onKeyUp);
 
 	// Lights.
-	light = new THREE.PointLight(0xffffff, 1.5);
-	light.position.set(-600, 600, 1000);
-	scene.add(light);
+	// light = new THREE.PointLight(0xffffff, 100.0);
+	// light.position.set(-600, 600, 1000);
+	// scene.add(light);
 
 	const loadWalls = Array(map.linedefCount).fill().map((_,k)=>k).map(async i => {
 		const linedef = map.linedef(i);
 
 		const _from = map.vertex(linedef.from);
-		const _to = map.vertex(linedef.to);
-		const from = flipVertex(map, _from);
-		const to   = flipVertex(map, _to);
+		const _to   = map.vertex(linedef.to);
+		const from  = flipVertex(map, _from);
+		const to    = flipVertex(map, _to);
 
 		const right = map.sidedef(linedef.right);
 		const left = linedef.left >= 0 ? map.sidedef(linedef.left) : false;
 
 		const rSector = map.sector(right.sector);
 		const lSector = left && map.sector(left.sector);
+
+		const rLight = 32 - Math.trunc(rSector.lightLevel / 8);
+		const lLight = lSector && (32 - Math.trunc(lSector.lightLevel / 8));
+
+		const rSky = rSector.ceilingFlat === 'F_SKY1';
+		const lSky = lSector.ceilingFlat === 'F_SKY1';
 
 		if(!sectorLinedefs.has(rSector.index))
 		{
@@ -282,12 +302,12 @@ async function setup()
 
 		const _linedefPlanes  = linedefPlanes.get(linedef.index);
 		const rSectorLinedefs = sectorLinedefs.get(rSector.index);
+
 		rSectorLinedefs.add(i);
 
 		if(lSector)
 		{
-			const lSectorLinedefs = sectorLinedefs.get(lSector.index);
-			lSectorLinedefs.add(i);
+			sectorLinedefs.get(lSector.index).add(i);
 		}
 
 		const xCenter = (from.x + to.x) / 2;
@@ -298,41 +318,52 @@ async function setup()
 
 		if(rSector.ceilingHeight === rSector.floorHeight)
 		{
-			rSector.ceilingHeight += 56;
+			// rSector.ceilingHeight += 56;
 		}
 
-		const rmHeight = rSector.ceilingHeight - rSector.floorHeight;
-		const rlHeight = lSector.floorHeight   - rSector.floorHeight   || 0;
-		const ruHeight = rSector.ceilingHeight - lSector.ceilingHeight || 0;
+		const maxFloor   = !lSector ? rSector.floorHeight   : Math.max(rSector.floorHeight,   lSector.floorHeight);
+		const minFloor   = !lSector ? rSector.floorHeight   : Math.min(rSector.floorHeight,   lSector.floorHeight);
+		const minCeiling = !lSector ? rSector.ceilingHeight : Math.min(rSector.ceilingHeight, lSector.ceilingHeight);
+		const maxCeiling = !lSector ? rSector.ceilingHeight : Math.max(rSector.ceilingHeight, lSector.ceilingHeight);
 
-		const lmHeight = lSector.ceilingHeight - lSector.floorHeight   || 0;
-		const llHeight = rSector.floorHeight   - lSector.floorHeight   || 0;
-		const luHeight = lSector.ceilingHeight - rSector.ceilingHeight || 0;
+		const rHeight  = rSector.ceilingHeight - rSector.floorHeight;
+		const lHeight  = lSector.ceilingHeight - lSector.floorHeight;
+
+		const rmHeight = minCeiling - maxFloor;
+		const rlHeight = maxFloor   - minFloor;
+		const ruHeight = maxCeiling - minCeiling;
+
+		const lmHeight = minCeiling - maxFloor;
+		const llHeight = maxFloor   - minFloor;
+		const luHeight = maxCeiling - minCeiling;
 
 		const uUnpegged = linedef.flags & (1<<3);
 		const lUnpegged = linedef.flags & (1<<4);
 
 		if(isTextureName(right.middle))
 		{
-			const [texture, wadTexture] = await loadTexture(wad, right.middle);
-			const material = new THREE.MeshBasicMaterial({map: texture, transparent: true});
+			const texture = await loadTexture(wad, right.middle, rLight);
+			const wadTexture = texture.userData.wadTexture;
+			const material = new THREE.MeshBasicMaterial({
+				map: texture,
+				transparent: true
+			});
+
 			const geometry = new THREE.PlaneGeometry(length, rmHeight, 1);
 			const plane = new THREE.Mesh(geometry, material);
-
-			texture.magFilter = THREE.NearestFilter;
-			texture.wrapS = THREE.RepeatWrapping;
-			texture.wrapT = THREE.RepeatWrapping;
 
 			if(wadTexture)
 			{
 				const hRepeat = length / wadTexture.width;
 				const vRepeat = rmHeight / wadTexture.height;
+
 				texture.repeat.set(hRepeat, vRepeat);
+
 				if(lUnpegged)
 				{
 					texture.offset.set(
 						right.xOffset / wadTexture.width,
-						(wadTexture.height + -rmHeight + -right.yOffset) / wadTexture.height
+						(wadTexture.height + -right.yOffset) / wadTexture.height
 					);
 				}
 				else
@@ -346,7 +377,7 @@ async function setup()
 
 			plane.position.x = xCenter;
 			plane.position.z = yCenter;
-			plane.position.y = rmHeight/2 + rSector.floorHeight;
+			plane.position.y = rmHeight/2 + maxFloor;
 			plane.rotation.y = angle;
 
 			_linedefPlanes.add(plane);
@@ -355,14 +386,14 @@ async function setup()
 
 		if(isTextureName(right.lower))
 		{
-			const [texture, wadTexture] = await loadTexture(wad, right.lower);
-			const material = new THREE.MeshBasicMaterial({map: texture, transparent: true});
+			const texture = await loadTexture(wad, right.lower, rLight);
+			const wadTexture = texture.userData.wadTexture;
+			const material = new THREE.MeshBasicMaterial({
+				map: texture,
+				transparent: true
+			});
 			const geometry = new THREE.PlaneGeometry(length, rlHeight, 1);
 			const plane = new THREE.Mesh(geometry, material);
-
-			texture.magFilter = THREE.NearestFilter;
-			texture.wrapS = THREE.RepeatWrapping;
-			texture.wrapT = THREE.RepeatWrapping;
 
 			if(wadTexture)
 			{
@@ -370,43 +401,41 @@ async function setup()
 				const vRepeat = rlHeight / wadTexture.height;
 				texture.repeat.set(hRepeat, vRepeat);
 
-				if(lUnpegged)
+				if(!lUnpegged)
 				{
+					texture.center.set(0, 1);
 					texture.offset.set(
 						right.xOffset / wadTexture.width,
-						(wadTexture.height + -rmHeight + -right.yOffset) / wadTexture.height
+						-right.yOffset / wadTexture.height
 					);
 				}
 				else
 				{
+					texture.center.set(0, 0);
 					texture.offset.set(
 						right.xOffset / wadTexture.width,
-						right.yOffset / wadTexture.height
+						(right.yOffset + -rHeight + wadTexture.height) / wadTexture.height
 					);
 				}
 			}
 
 			plane.position.x = xCenter;
 			plane.position.z = yCenter;
-			plane.position.y = rlHeight/2 + rSector.floorHeight;
+			plane.position.y = rlHeight/2 + minFloor;
 			plane.rotation.y = angle;
 
 			_linedefPlanes.add(plane);
 			scene.add(plane);
 		}
 
-		if(isTextureName(right.upper))
+		if(!(rSky && lSky) && isTextureName(right.upper))
 		{
-			const [texture, wadTexture] = await loadTexture(wad, right.upper);
+			const texture = await loadTexture(wad, right.upper, rLight);
+			const wadTexture = texture.userData.wadTexture;
 			const material = new THREE.MeshBasicMaterial({map: texture, transparent: true});
+
 			const geometry = new THREE.PlaneGeometry(length, ruHeight, 1);
 			const plane = new THREE.Mesh(geometry, material);
-
-			// console.log(right, texture, wadTexture, await wadTexture.decode());
-
-			texture.magFilter = THREE.NearestFilter;
-			texture.wrapS = THREE.RepeatWrapping;
-			texture.wrapT = THREE.RepeatWrapping;
 
 			if(wadTexture)
 			{
@@ -416,23 +445,56 @@ async function setup()
 
 				if(uUnpegged)
 				{
-					texture.offset.set(
-						right.xOffset / wadTexture.width,
-						(wadTexture.height + -rmHeight + lmHeight + -right.yOffset) / wadTexture.height
-					);
+					texture.center.set(0, 1);
 				}
-				else
+
+				texture.offset.set(
+					right.xOffset / wadTexture.width,
+					-right.yOffset / wadTexture.height
+				);
+
+				if(wadTexture.animation)
 				{
-					texture.offset.set(
-						right.xOffset / wadTexture.width,
-						-right.yOffset / wadTexture.height
-					);
+					animatedWalls.add(plane);
+
+					plane.userData.animation = wadTexture.animation;
+					plane.userData.age = 0;
+
+					const frameNames = wad.textureAnimation(wadTexture.animation);
+					const frames = [];
+
+					for(const frameName of frameNames)
+					{
+						const wadTexture = wad.texture(frameName);
+						const url  = await wadTexture.decode(rLight);
+						const texture = textureLoader.load(url);
+
+						if(uUnpegged)
+						{
+							texture.center.set(0, 1);
+						}
+
+						texture.repeat.set(hRepeat, vRepeat);
+
+						texture.offset.set(
+							right.xOffset / wadTexture.width,
+							-right.yOffset / wadTexture.height
+						);
+
+						texture.wrapS = THREE.RepeatWrapping;
+						texture.wrapT = THREE.RepeatWrapping;
+						texture.colorSpace = THREE.SRGBColorSpace;
+
+						frames.push(texture);
+					}
+
+					plane.userData.frames = frames;
 				}
 			}
 
 			plane.position.x = xCenter;
 			plane.position.z = yCenter;
-			plane.position.y = -ruHeight/2 + rSector.ceilingHeight;
+			plane.position.y = ruHeight/2 + minCeiling;
 			plane.rotation.y = angle;
 
 			_linedefPlanes.add(plane);
@@ -441,24 +503,33 @@ async function setup()
 
 		if(left && isTextureName(left.middle))
 		{
-			const [texture, wadTexture] = await loadTexture(wad, left.middle);
+			const texture = await loadTexture(wad, left.middle, lLight);
+			const wadTexture = texture.userData.wadTexture;
 			const material = new THREE.MeshBasicMaterial({map: texture, transparent: true});
 			const geometry = new THREE.PlaneGeometry(length, lmHeight, 1);
 			const plane = new THREE.Mesh(geometry, material);
-
-			texture.offset.set(left.xOffset, left.yOffset);
-			texture.wrapS = THREE.RepeatWrapping;
-			texture.wrapT = THREE.RepeatWrapping;
 
 			if(wadTexture)
 			{
 				const hRepeat = length / wadTexture.width;
 				const vRepeat = lmHeight / wadTexture.height;
+
 				texture.repeat.set(hRepeat, vRepeat);
-				texture.offset.set(
-					left.xOffset / wadTexture.width,
-					(wadTexture.height + -lmHeight + -left.yOffset) / wadTexture.height
-				);
+
+				if(lUnpegged)
+				{
+					texture.offset.set(
+						left.xOffset / wadTexture.width,
+						(wadTexture.height + -left.yOffset) / wadTexture.height
+					);
+				}
+				else
+				{
+					texture.offset.set(
+						left.xOffset / wadTexture.width,
+						(wadTexture.height + -lmHeight + -left.yOffset) / wadTexture.height
+					);
+				}
 			}
 
 			plane.position.x = xCenter;
@@ -472,39 +543,39 @@ async function setup()
 
 		if(left && isTextureName(left.lower))
 		{
-			const [texture, wadTexture] = await loadTexture(wad, left.lower);
+			const texture = await loadTexture(wad, left.lower, lLight);
+			const wadTexture = texture.userData.wadTexture;
 			const material = new THREE.MeshBasicMaterial({map: texture, transparent: true});
 			const geometry = new THREE.PlaneGeometry(length, llHeight, 1);
 			const plane = new THREE.Mesh(geometry, material);
-
-			texture.offset.set(left.xOffset, left.yOffset);
-			texture.wrapS = THREE.RepeatWrapping;
-			texture.wrapT = THREE.RepeatWrapping;
 
 			if(wadTexture)
 			{
 				const hRepeat = length / wadTexture.width;
 				const vRepeat = llHeight / wadTexture.height;
 				texture.repeat.set(hRepeat, vRepeat);
-				if(lUnpegged)
+
+				if(!lUnpegged)
 				{
+					texture.center.set(0, 1);
 					texture.offset.set(
 						left.xOffset / wadTexture.width,
-						(wadTexture.height + -lmHeight + -left.yOffset) / wadTexture.height
+						-left.yOffset / wadTexture.height
 					);
 				}
 				else
 				{
+					texture.center.set(0, 0);
 					texture.offset.set(
 						left.xOffset / wadTexture.width,
-						left.yOffset / wadTexture.height
+						(left.yOffset + -lHeight + wadTexture.height) / wadTexture.height
 					);
 				}
 			}
 
 			plane.position.x = xCenter;
 			plane.position.z = yCenter;
-			plane.position.y = llHeight/2 + lSector.floorHeight;
+			plane.position.y = llHeight/2 + minFloor;
 			plane.rotation.y = angle + Math.PI;
 
 			_linedefPlanes.add(plane);
@@ -513,40 +584,32 @@ async function setup()
 
 		if(left && isTextureName(left.upper))
 		{
-			const [texture, wadTexture] = await loadTexture(wad, left.upper);
+			const texture = await loadTexture(wad, left.upper, lLight);
+			const wadTexture = texture.userData.wadTexture;
 			const material = new THREE.MeshBasicMaterial({map: texture, transparent: true});
 			const geometry = new THREE.PlaneGeometry(length, luHeight, 1);
 			const plane = new THREE.Mesh(geometry, material);
 
-			texture.offset.set(left.xOffset, left.yOffset);
-			texture.wrapS = THREE.RepeatWrapping;
-			texture.wrapT = THREE.RepeatWrapping;
-
 			if(wadTexture)
 			{
 				const hRepeat = length / wadTexture.width;
-				const vRepeat = luHeight / wadTexture.height;
+				const vRepeat = ruHeight / wadTexture.height;
 				texture.repeat.set(hRepeat, vRepeat);
 
 				if(uUnpegged)
 				{
-					texture.offset.set(
-						left.xOffset / wadTexture.width,
-						(wadTexture.height + -luHeight + -left.yOffset) / wadTexture.height
-					);
+					texture.center.set(0, 1);
 				}
-				else
-				{
-					texture.offset.set(
-						left.xOffset / wadTexture.width,
-						-left.yOffset / wadTexture.height
-					);
-				}
+
+				texture.offset.set(
+					right.xOffset / wadTexture.width,
+					-right.yOffset / wadTexture.height
+				);
 			}
 
 			plane.position.x = xCenter;
 			plane.position.z = yCenter;
-			plane.position.y = -luHeight/2 + lSector.ceilingHeight;
+			plane.position.y = luHeight/2 + minCeiling;
 			plane.rotation.y = angle + Math.PI;
 
 			_linedefPlanes.add(plane);
@@ -558,36 +621,40 @@ async function setup()
 		const glSubsector = map.glSubsector(i);
 		const sector = map.sector(glSubsector.sector);
 
-		const floorFlat   = await map.wad.flat(sector.floorFlat).decode();
-		const ceilingFlat = await map.wad.flat(sector.ceilingFlat).decode();
+		const lightLevel = 32 - Math.trunc(sector.lightLevel / 8);
 
-		const vertexes = glSubsector.vertexes().map(v => flipVertex(map, v));
-		const backward = [...vertexes].reverse();
+		const original = glSubsector.vertexes();
+		const vertexes = original.map(v => flipVertex(map, v));
+		const Vector2s = vertexes.map(v => new THREE.Vector2(v.x, v.y));
+		const backward = [...Vector2s].reverse();
 
-		const floorShape = new THREE.Shape(vertexes.map(
-			(vertex) => new THREE.Vector2(vertex.x, vertex.y))
-		);
-		const ceilingShape = new THREE.Shape(backward.map(
-			(vertex) => new THREE.Vector2(vertex.x, vertex.y))
-		);
+		const floorShape = new THREE.Shape(Vector2s);
+		const ceilingShape = new THREE.Shape(backward);
+
+		const floorFlat = wad.flat(sector.floorFlat);
+		const ceilingFlat = wad.flat(sector.ceilingFlat);
 
 		const floorGeometry = new THREE.ShapeGeometry(floorShape);
-
 		floorGeometry.setAttribute('position', new THREE.Float32BufferAttribute(
 			vertexes.map(vertex => [vertex.x, sector.floorHeight, vertex.y]).flat(), 3
 		));
 
 		const ceilingGeometry = new THREE.ShapeGeometry(ceilingShape);
-
 		ceilingGeometry.setAttribute('position', new THREE.Float32BufferAttribute(
 			backward.map(vertex => [vertex.x, sector.ceilingHeight, vertex.y]).flat(), 3
 		));
 
-		const floorTexture   = textureLoader.load(floorFlat);
-		const ceilingTexture = textureLoader.load(ceilingFlat);
+		const floorTexture   = textureLoader.load(await floorFlat.decode(lightLevel));
+		const ceilingTexture = textureLoader.load(await ceilingFlat.decode(lightLevel));
 
-		floorTexture.magFilter = THREE.NearestFilter;
+		floorTexture.magFilter   = THREE.NearestFilter;
 		ceilingTexture.magFilter = THREE.NearestFilter;
+
+		// floorTexture.minFilter   = THREE.NearestFilter;
+		// ceilingTexture.minFilter = THREE.NearestFilter;
+
+		floorTexture.colorSpace   = THREE.SRGBColorSpace;
+		ceilingTexture.colorSpace = THREE.SRGBColorSpace;
 
 		floorTexture.wrapS   = THREE.RepeatWrapping;
 		floorTexture.wrapT   = THREE.RepeatWrapping;
@@ -605,37 +672,128 @@ async function setup()
 		const floor   = new THREE.Mesh(floorGeometry, floorMaterial);
 		const ceiling = new THREE.Mesh(ceilingGeometry, ceilingMaterial);
 
+		if(floorFlat.animation)
+		{
+			animatedFlats.add(floor);
+
+			floor.userData.animation = floorFlat.animation;
+			floor.userData.age = 0;
+			animatedFlats.add(floor);
+
+			const frameNames = wad.flatAnimation(floorFlat.animation);
+			const frames = [];
+
+			for(const frameName of frameNames)
+			{
+				const flat = wad.flat(frameName);
+				const url  = await flat.decode(lightLevel);
+				const texture = textureLoader.load(url)
+				texture.repeat.set(bounds.width / 64, bounds.height / 64);
+				texture.wrapS = THREE.RepeatWrapping;
+				texture.wrapT = THREE.RepeatWrapping;
+				texture.colorSpace = THREE.SRGBColorSpace;
+
+				frames.push(texture);
+			}
+
+			floor.userData.frames = frames;
+		}
+
+		if(ceilingFlat.animation)
+		{
+			animatedFlats.add(ceiling);
+
+			ceiling.userData.animation = ceilingFlat.animation;
+			ceiling.userData.age = 0;
+			animatedFlats.add(ceiling);
+
+			const frameNames = wad.flatAnimation(ceilingFlat.animation);
+			const frames = [];
+
+			for(const frameName of frameNames)
+			{
+				const flat = wad.flat(frameName);
+				const url  = await flat.decode(lightLevel);
+				const texture = textureLoader.load(url)
+				texture.repeat.set(bounds.width / 64, bounds.height / 64);
+				texture.wrapS = THREE.RepeatWrapping;
+				texture.wrapT = THREE.RepeatWrapping;
+				texture.colorSpace = THREE.SRGBColorSpace;
+
+				frames.push(texture);
+			}
+
+			ceiling.userData.frames = frames;
+		}
+
 		let xfOffset = 0;
 		let yfOffset = 0;
 		let xcOffset = 0;
 		let ycOffset = 0;
 
-		if(sector.floorFlat.substr(0, 5) === 'DEM1_')
-		{
-			yfOffset = 32;
-		}
+		const offsetPrefixes = [
+			'CEIL4_3', 'DEM1_',  'TLITE6_1'
+		];
 
-		if(sector.ceilingFlat.substr(0, 5) === 'DEM1_')
+		for(const offsetPrefix of offsetPrefixes)
 		{
-			ycOffset = 32;
+			if(sector.floorFlat.substr(0, offsetPrefix.length) === offsetPrefix)
+			{
+				yfOffset = 32;
+				break;
+			}
+
+			if(sector.ceilingFlat.substr(0, offsetPrefix.length) === offsetPrefix)
+			{
+				ycOffset = 32;
+				break;
+			}
 		}
 
 		setUV(floorGeometry, xfOffset, yfOffset);
 		setUV(ceilingGeometry, xcOffset, ycOffset);
 
 		scene.add(floor);
-		scene.add(ceiling);
+
+		if(sector.ceilingFlat !== 'F_SKY1')
+		{
+			scene.add(ceiling);
+		}
 	});
 
-	await Promise.all([loadWalls, loadFloors]);
+	let hasSky = true;
 
-	console.log(linedefPlanes, sectorLinedefs);
+	if(hasSky)
+	{
+		const texture = await loadTexture(wad, 'SKY1', lightLevel);
+		texture.magFilter = THREE.NearestFilter;
+		// texture.minFilter = THREE.NearestFilter;
+		texture.wrapS = THREE.RepeatWrapping;
+		texture.wrapT = THREE.ClampToEdgeWrapping;
+		texture.colorSpace = THREE.SRGBColorSpace;
+		scene.background = texture;
+	}
+
+	await Promise.all([...loadWalls, ...loadFloors]);
 
 	console.timeEnd('setup');
 }
 
-function render()
+let then = 0;
+
+function render(now)
 {
+	requestAnimationFrame(render);
+
+	const delta = now - then;
+
+	if(delta < 16)
+	{
+		return;
+	}
+
+	then = now;
+
 	direction.z = Number( moveForward ) - Number( moveBackward );
 	direction.x = Number( moveRight ) - Number( moveLeft );
 	direction.y = Number( moveUp ) - Number( moveDown );
@@ -651,15 +809,12 @@ function render()
 
 	controls.moveRight(direction.x * speed);
 	controls.moveForward(direction.z * speed);
-	// controls.moveUpward(direction.y * speed);
+
 	// camera.position.y += direction.y * speed;
-
-	const unflipped = unflipVertex(map, {
-		x: camera.position.x,
-		y: camera.position.z
-	});
-
-	// console.log(map.blockForPoint(unflipped.x, unflipped.y));
+	// const unflipped = unflipVertex(map, {
+	// 	x: camera.position.x,
+	// 	y: camera.position.z
+	// });
 
 	if(sector)
 	{
@@ -686,11 +841,53 @@ function render()
 		yVel = 0;
 	}
 
+	const camDir = new THREE.Vector3();
+	camera.getWorldDirection(camDir);
+	const hCam = Math.PI + Math.atan2(camDir.x, camDir.z);
+	const vCam = camDir.y;
+
+	scene.background.repeat.set(-camera.aspect/2, 0.85);
+	scene.background.offset.set((4*hCam)/(Math.PI*2) + 0.5, vCam + -0.15);
+
+	for(const mesh of animatedFlats)
+	{
+		if(!mesh.userData.frames) continue;
+		const frames = mesh.userData.frames;
+
+		mesh.userData.age += delta;
+		const time = Math.floor(mesh.userData.age / (16 * 12));
+		const current = frames[time % frames.length];
+
+		if(mesh.userData.current !== current)
+		{
+			mesh.userData.current = current;
+			mesh.material.map = current;
+			mesh.material.needsUpdate = true;
+		}
+	}
+
+	for(const mesh of animatedWalls)
+	{
+		if(!mesh.userData.frames) continue;
+		const frames = mesh.userData.frames;
+
+		mesh.userData.age += delta;
+		const time = Math.floor(mesh.userData.age / (16 * 12));
+		const current = frames[time % frames.length];
+
+		if(mesh.userData.current !== current)
+		{
+			mesh.userData.current = current;
+			mesh.material.map = current;
+			mesh.material.needsUpdate = true;
+		}
+	}
+
 	renderer.render(scene, camera);
-	window.requestAnimationFrame(render);
 }
 
 function onWindowResize() {
+	if(!camera) return;
 	camera.aspect = window.innerWidth / window.innerHeight;
 	camera.updateProjectionMatrix();
 	renderer.setSize( window.innerWidth, window.innerHeight );
@@ -699,8 +896,8 @@ function onWindowResize() {
 async function start()
 {
 	await setup();
-	window.requestAnimationFrame(render);
+	onWindowResize();
+	requestAnimationFrame(render);
 }
 
 start();
-onWindowResize();

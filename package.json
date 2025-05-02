@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-   "build": "npx webpack build --mode=production",
+    "build": "npx webpack build --mode=production",
     "serve": "npx webpack serve --mode=development",
     "serve:prod": "npx webpack serve --mode=production"
   },
@@ -25,6 +25,7 @@
     "wepack-cli": "^0.0.1-security"
   },
   "dependencies": {
+    "copy-webpack-plugin": "^13.0.0",
     "three": "^0.176.0"
   }
 }

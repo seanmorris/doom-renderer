@@ -1,5 +1,6 @@
 //Ensure html-webpack-plugin is pre-installed via npm.
 import HtmlWebpackPlugin from 'html-webpack-plugin';
+import CopyWebpackPlugin from 'copy-webpack-plugin';
 import path from 'node:path';
 import { fileURLToPath } from 'url';
 
@@ -23,6 +24,11 @@ const plugins = [
 	new HtmlWebpackPlugin({
 		template: './src/index.html',
 		filename: "./index.html"
+	}),
+	new CopyWebpackPlugin({
+		patterns: [
+			{from: './src/wads', to: 'wads'},
+		]
 	}),
 ];
 

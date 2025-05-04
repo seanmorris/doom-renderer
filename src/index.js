@@ -722,7 +722,7 @@ async function setup()
 
 	if(process.env.NODE_ENV === 'production')
 	{
-		prefix = '/doom-renderer/wads/'
+		prefix = '/doom-renderer/wads'
 	}
 
 	wad = new WadLoader(

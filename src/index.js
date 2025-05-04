@@ -719,7 +719,7 @@ async function setup()
 
 	const selectedWad = query.has('wad') ? query.get('wad') : 'DOOM1.GL.WAD';
 
-	let wadUrl = new URL(selectedWad);
+	let wadUrl = new URL(selectedWad, location.origin);
 
 	if(wadUrl.origin === location.origin)
 	{

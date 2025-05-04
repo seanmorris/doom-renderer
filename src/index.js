@@ -708,21 +708,22 @@ async function setup()
 {
 	console.time('setup');
 
-	const query = new URLSearchParams(location.search);
-
-	const selectedWad = query.has('wad') ? query.get('wad') : 'DOOM1.GL.WAD';
-	let wadUrl = new URL(selectedWad, location);
-
-	if(wadUrl.origin === location.origin)
-	{
-		wadUrl = './wads/' + wadUrl.pathname.substr(1);
-	}
-
 	let prefix = '/wads';
 
 	if(process.env.NODE_ENV === 'production')
 	{
 		prefix = '/doom-renderer/wads'
+	}
+
+	const query = new URLSearchParams(location.search);
+
+	const selectedWad = query.has('wad') ? query.get('wad') : 'DOOM1.GL.WAD';
+
+	let wadUrl = new URL(selectedWad, location);
+
+	if(wadUrl.origin === location.origin)
+	{
+		wadUrl = prefix + '/' + wadUrl.pathname.substr(1);
 	}
 
 	wad = new WadLoader(

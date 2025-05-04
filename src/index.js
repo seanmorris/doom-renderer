@@ -718,10 +718,15 @@ async function setup()
 		wadUrl = './wads/' + wadUrl.pathname.substr(1);
 	}
 
-	console.log(wadUrl);
+	let prefix = '/wads';
+
+	if(process.env.NODE_ENV === 'production')
+	{
+		prefix = '/doom-renderer/wads/'
+	}
 
 	wad = new WadLoader(
-		await (await fetch('./wads/DOOM1.GL.WAD')).arrayBuffer(),
+		await (await fetch(prefix + '/DOOM1.GL.WAD')).arrayBuffer(),
 		await (await fetch(wadUrl)).arrayBuffer(),
 		// await (await fetch(CHEX)).arrayBuffer(),
 		// await (await fetch(HACKED)).arrayBuffer(),

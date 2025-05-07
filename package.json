@@ -15,7 +15,6 @@
     "arraybuffer-loader": "^1.0.8",
     "binary-loader": "^0.0.1",
     "dotenv-webpack": "^8.1.0",
-    "file-loader": "^6.2.0",
     "html-loader": "^5.1.0",
     "html-webpack-plugin": "^5.6.3",
     "raw-loader": "^4.0.2",

@@ -1,10 +1,16 @@
 'use strict';
 
 import * as THREE from 'three';
+import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
-import { WadLoader } from 'doom-parser/Wad.mjs'
+import Zdbsp from 'zdbsp-wasm/Zdbsp.mjs';
+import GlbspBinary from 'glbsp-wasm/GlbspBinary.mjs';
+import GlvisBinary from 'glvis-wasm/GlvisBinary.mjs';
+import { Wad, WadLoader } from 'doom-parser/Wad.mjs'
+import MissingTexture from './MissingTexture3D.png';
+import favicon from './favicon.ico';
 
-let camera, scene, renderer, light, controls;
+let camera, scene, renderer, controls;
 let moveForward = false;
 let moveBackward = false;
 let moveLeft = false;
@@ -24,87 +30,569 @@ const textureLoader = new THREE.TextureLoader();
 const flipVertex = (map, vertex) => ({x: vertex.x, y: map.bounds.yMax - (vertex.y - map.bounds.yMin)});
 const unflipVertex = (map, vertex) => ({x: vertex.x, y: map.bounds.yMin - (vertex.y - map.bounds.yMax)});
 
-class Room
+const byteToLightOffset = byte => (33 - Math.trunc(byte / 8));
+
+const missing = textureLoader.load(MissingTexture);
+
+const loadTexture = async (wad, name, lightLevel) => {
+	const wadTexture = wad.texture(name.toUpperCase()) || wad.flat(name.toUpperCase());
+
+	const texture = wadTexture
+		? textureLoader.load(await wadTexture.decode(lightLevel))
+		: missing.clone();
+
+	texture.userData.wadTexture = wadTexture;
+	texture.userData.missing = !!wadTexture;
+
+	texture.magFilter = THREE.NearestFilter;
+	if(lowRes) texture.minFilter = THREE.NearestFilter;
+	texture.wrapS = THREE.RepeatWrapping;
+	texture.wrapT = THREE.RepeatWrapping;
+	texture.colorSpace = THREE.SRGBColorSpace;
+
+	return texture;
+}
+
+const isTextureName = name => {
+	return name
+		&& name !== '-'
+		&& name !== 'AASTINKY'
+		&& name !== 'AASHITTY';
+}
+
+const textures = new Map;
+const thingMaterials = new Map;
+const thingGeometries = new Map;
+
+class Level extends EventTarget
 {
-	constructor(sector, scene)
+	constructor(map, wad, scene)
 	{
-		this.floorHeight = sector.floorHeight;
+		super();
+		this.rooms = new Map;
+		this.map = map;
+		this.wad = wad;
+		this.scene = scene;
+		this.roomThings = new Map;
+		this.animatedWalls = new Set;
+		this.animatedFlats = new Set;
+		this.tags = new Map;
+		this.transparentPlanes = 0;
+		this.planes = 0;
+	}
+
+	async setup()
+	{
+		const loadRooms = Array(this.map.sectorCount).fill().map((_,k)=>k).map(async i => {
+			this.rooms.set(i, new Room(map.sector(i), this, this.scene));
+		});
+
+		const loadWalls = Array(this.map.linedefCount).fill().map((_,k)=>k).map(async i => {
+			const linedef = map.linedef(i);
+
+			const right   = map.sidedef(linedef.right);
+			const left    = linedef.left >= 0 ? map.sidedef(linedef.left) : false;
+
+			const rSector = map.sector(right.sector);
+			const lSector = left && map.sector(left.sector);
+
+			const rRoom   = this.rooms.get(rSector.index);
+			const lRoom   = lSector && this.rooms.get(lSector.index);
+
+			rRoom.addWall(linedef);
+			lRoom && lRoom.addWall(linedef, true);
+		});
+
+		const loadThings = Array(map.thingCount).fill().map((_,k)=>k).map(async i => {
+			const thing = map.thing(i);
+
+			if(thing.flags.multip || [2,3,4,10,12,15,24].includes(thing.type)) return;
+			// if(thing.flags.multip || [2,3,4,10,12,15,116,127].includes(thing.type)) return;
+
+			if(!thing.meta)
+			{
+				return;
+			}
+
+			const spriteName = thing.meta.sprite;
+
+			if(!spriteName || spriteName[0] === '-')
+			{
+				return;
+			}
+
+			const sector = map.bspPoint(thing.x, thing.y);
+			const room = this.rooms.get(sector.index);
+
+			const _sprite = wad.sprite(thing.meta.sprite);
+			const sprite = [];
+
+			if(_sprite)
+			{
+				for(const f in _sprite)
+				for(const a in _sprite[f])
+				{
+					if(f > 0) break;
+
+					const frame = _sprite[f][a];
+
+					if(!frame) continue;
+
+					// const texture = textureLoader.load(
+					// 	await frame.picture.decode( byteToLightOffset(sector.lightLevel))
+					// );
+
+					const spriteKey = thing.meta.sprite + f + a;
+
+					if(!textures.has(spriteKey))
+					{
+						textures.set(spriteKey, new Map);
+					}
+
+					if(!textures.get(spriteKey).has(sector.lightLevel))
+					{
+						const texture = textureLoader.load(await frame.picture.decode( byteToLightOffset(sector.lightLevel) ));
+
+						textures.get(spriteKey).set(sector.lightLevel, texture);
+					}
+
+					const texture = textures.get(spriteKey).get(sector.lightLevel).clone();
+
+					sprite[f] = sprite[f] || [];
+					sprite[f][a] = texture;
+
+					texture.repeat.set(frame.flipped ? -1 : 1, 1);
+					texture.wrapS      = THREE.RepeatWrapping;
+					texture.colorSpace = THREE.SRGBColorSpace;
+					texture.magFilter  = THREE.NearestFilter;
+					if(lowRes) texture.minFilter = THREE.NearestFilter;
+				}
+
+				const picture = (_sprite[0][0] || _sprite[0][1]).picture;
+				const texture = (sprite[0][0] || sprite[0][1]);
+
+				/*/
+				const material = (_sprite[0][0] || _sprite[0][1]) && new THREE.MeshBasicMaterial({
+					map: texture, transparent: true
+				});
+				/*/
+				if(!thingMaterials.has(thing.meta.sprite))
+				{
+					thingMaterials.set(thing.meta.sprite, new Map);
+				}
+
+				if(!thingMaterials.get(thing.meta.sprite).has(sector.lightLevel))
+				{
+					const material = (_sprite[0][0] || _sprite[0][1]) && new THREE.MeshBasicMaterial({
+						map: texture, transparent: true
+					});
+
+					thingMaterials.get(thing.meta.sprite).set(sector.lightLevel, material);
+				}
+
+				const material = thingMaterials.get(thing.meta.sprite).get(sector.lightLevel).clone();
+				//*/
+
+				/*/
+				const geometry = new THREE.PlaneGeometry(picture.width, picture.height, 1);
+				/*/
+				if(!thingGeometries.has(thing.meta.sprite))
+				{
+					thingGeometries.set(thing.meta.sprite, new THREE.PlaneGeometry(picture.width, picture.height, 1));
+				}
+				const geometry = thingGeometries.get(thing.meta.sprite);
+				//*/
+
+				const plane = new THREE.Mesh(geometry, material);
+				const pos   = flipVertex(map, thing);
+
+				plane.position.x = pos.x;
+				plane.position.z = pos.y;
+				plane.position.y = sector.floorHeight + picture.height / 2;
+				plane.rotation.y = 0;
+
+				plane.userData.thing  = thing;
+				plane.userData.sprite = sprite;
+				plane.userData.height = picture.height;
+
+				room.addThing(plane);
+				things.add(plane);
+				scene.add(plane);
+			}
+		});
+
+		const roomSubsectors = new Map;
+		Array(map.glSubsectorCount).fill().forEach((_,k) => {
+			const subsector = this.map.glSubsector(k);
+			const room = this.rooms.get(subsector.sector);
+			if(!roomSubsectors.has(room))
+			{
+				roomSubsectors.set(room, new Set);
+			}
+			roomSubsectors.get(room).add(subsector);
+		});
+
+		for(const [room, subsectors] of roomSubsectors)
+		{
+			room.addFlats(subsectors);
+		}
+
+		const lightLevel = 0;
+
+		const texture = await loadTexture(wad, 'SKY1', lightLevel);
+		if(lowRes) texture.minFilter = THREE.NearestFilter;
+		texture.magFilter = THREE.NearestFilter;
+		texture.wrapS = THREE.RepeatWrapping;
+		texture.wrapT = THREE.ClampToEdgeWrapping;
+		texture.colorSpace = THREE.SRGBColorSpace;
+		this.scene.background = texture;
+
+		await Promise.all([...loadRooms, ...loadWalls, ...loadThings]);
+
+		console.log(this.transparentPlanes, this.planes, map.thingCount, thingMaterials);
+
+		for(const room of this.rooms.values())
+		{
+			const sector = map.sector(room.index);
+
+			room.addEventListener('ceiling-start', event => {
+				if(!room.isDoor) return;
+				if(event.detail.height === event.detail.original) playSample(
+					wad.sample('DSDOROPN'),
+					sector.bounds.xPosition,
+					sector.bounds.yPosition,
+				)
+				else  playSample(
+					wad.sample('DSDORCLS'),
+					sector.bounds.xPosition,
+					sector.bounds.yPosition,
+				);
+			});
+
+			room.addEventListener('ceiling-stop', event => {});
+
+			room.addEventListener('floor-start', event => {
+				if(!event.target.lastAction) return;
+				if(event.target.lastAction.soundMeta && event.target.lastAction.soundMeta.start)
+				{
+					playSample(
+						wad.sample('DS' + event.target.lastAction.soundMeta.start),
+						sector.bounds.xPosition,
+						sector.bounds.yPosition,
+					);
+				}
+			});
+
+			room.addEventListener('floor-stop', event => {
+				if(!event.target.lastAction || !event.target.lastAction.soundMeta) return;
+				playSample(
+					wad.sample('DS' + event.target.lastAction.soundMeta.stop),
+					sector.bounds.xPosition,
+					sector.bounds.yPosition,
+				);
+			});
+		}
+	}
+
+	simulate(delta)
+	{
+		for(const mesh of this.animatedFlats)
+		{
+			if(!mesh.userData.frames) continue;
+			const frames = mesh.userData.frames;
+
+			mesh.userData.age += delta;
+			const time = Math.floor(mesh.userData.age / (16 * 12));
+			const current = frames[time % frames.length];
+
+			if(mesh.userData.current !== current)
+			{
+				mesh.userData.current = current;
+				mesh.material.map = current;
+				mesh.material.needsUpdate = true;
+			}
+		}
+
+		for(const mesh of this.animatedWalls)
+		{
+			if(!mesh.userData.frames) continue;
+			const frames = mesh.userData.frames;
+
+			mesh.userData.age += delta;
+			const time = Math.floor(mesh.userData.age / (16 * 12));
+			const current = frames[time % frames.length];
+
+			if(mesh.userData.current !== current)
+			{
+				mesh.userData.current = current;
+				mesh.material.map = current;
+				mesh.material.needsUpdate = true;
+			}
+		}
+
+		for(const thing of things)
+		{
+			const camAngle = thing.rotation.y = Math.PI + Math.atan2(
+				thing.position.x - camera.position.x,
+				thing.position.z - camera.position.z,
+			);
+
+			const thingAngle = (Math.PI/2) + (-thing.userData.thing.angle * Math.PI) / 180;
+
+			const relAngle = (camAngle + thingAngle) % (Math.PI * 2);
+
+			const roundedAngle = 1 + (4 + Math.round(relAngle / (Math.PI / 4))) % 8;
+			const sprite = thing.userData.sprite;
+			const frame = 0;
+
+			if(sprite[frame][0])
+			{
+				// console.log(roundedAngle, sprite[frame][0]);
+			}
+			else if(sprite[frame][roundedAngle])
+			{
+				thing.material.map = sprite[frame][roundedAngle];
+				thing.material.needsUpdate = true;
+			}
+		}
+	}
+}
+
+class Room extends EventTarget
+{
+	constructor(sector, level, scene)
+	{
+		super();
+
+		this.floorHeight   = sector.floorHeight;
 		this.ceilingHeight = sector.ceilingHeight;
 
-		this.originalFloorHeight = sector.floorHeight;
+		this.originalFloorHeight   = sector.floorHeight;
 		this.originalCeilingHeight = sector.ceilingHeight;
 
-		this.targetFloorHeight = sector.floorHeight;
+		this.targetFloorHeight   = sector.floorHeight;
 		this.targetCeilingHeight = sector.ceilingHeight;
 
-		this.moveSpeed = 0.15;
+		this.moveSpeed = 0.08;
 
-		this.floorFlat = sector.floorFlat;
+		this.floorFlat   = sector.floorFlat;
 		this.ceilingFlat = sector.ceilingFlat;
-		this.lightLevel = sector.lightLevel;
-		this.special = sector.special;
-		this.tag = sector.tag;
+
+		this.lightLevel  = sector.lightLevel;
+		this.special     = sector.special;
+
+		this.tag   = sector.tag;
 		this.index = sector.index;
 
 		this.sector = sector;
-		this.scene = scene;
+		this.level  = level;
+		this.scene  = scene;
 
 		this.ceilingPlanes = new Set;
-		this.floorPlanes = new Set;
+		this.floorPlanes   = new Set;
 
 		this.middlePlanes = new Set;
 		this.upperPlanes  = new Set;
 		this.lowerPlanes  = new Set;
+		this.innerPlanes  = new Set;
 
 		this.linedefs = new Set;
+		this.lastAction = null;
+		this.walls = new Map;
 		this.neighbors = new Set;
+		this.things = new Set;
 
 		this.isDoor = false;
+		this.visible = true;
 
-		if(!tags.has(this.tag))
+		if(!this.level.tags.has(this.tag))
 		{
-			tags.set(this.tag, new Set);
+			this.level.tags.set(this.tag, new Set);
 		}
 
 		this.timer = 0;
+		this.closeTime = -1;
 
-		tags.get(this.tag).add(this);
+		this.level.tags.get(this.tag).add(this);
+
+		this.ceilingMoving = false;
+		this.floorMoving = false;
+
+		this.switchesFlipped = new Set;
+	}
+
+	hide()
+	{
+		// if(!this.visible) return;
+
+		// for(const plane of [...this.innerPlanes, ...this.ceilingPlanes, ...this.floorPlanes, ...this.things])
+		for(const plane of [...this.middlePlanes, ...this.lowerPlanes, ...this.upperPlanes, ...this.ceilingPlanes, ...this.floorPlanes, ...this.things])
+		{
+			plane.visible = false;
+		}
+
+		this.visible = false;
+	}
+
+	show()
+	{
+		// if(this.visible) return;
+
+		// for(const plane of [...this.innerPlanes, ...this.ceilingPlanes, ...this.floorPlanes, ...this.things])
+		for(const plane of [...this.middlePlanes, ...this.lowerPlanes, ...this.upperPlanes, ...this.ceilingPlanes, ...this.floorPlanes, ...this.things])
+		{
+			plane.visible = true;
+		}
+
+		this.visible = true;
 	}
 
 	simulate(delta)
 	{
 		if(this.timer > 0)
 		{
-			this.timer--;
+			this.timer -= delta;
 			return;
 		}
+		else
+		{
+			this.timer = 0;
+		}
+
+		const groundedThings = new Set;
 
 		if(this.ceilingHeight !== this.targetCeilingHeight)
 		{
 			if(Math.abs(this.targetCeilingHeight - this.ceilingHeight) < delta * this.moveSpeed)
 			{
+				this.dispatchEvent(new CustomEvent('ceiling-stop', {detail: {
+					original: this.originalCeilingHeight,
+					height:   this.ceilingHeight,
+					target:   this.targetCeilingHeight,
+				}}));
+
 				this.ceilingHeight = this.targetCeilingHeight;
+				this.ceilingMoving = false;
 			}
 			else
 			{
+				if(!this.ceilingMoving)
+				{
+					this.dispatchEvent(new CustomEvent('ceiling-start', {detail: {
+						original: this.originalCeilingHeight,
+						height:   this.ceilingHeight,
+						target:   this.targetCeilingHeight,
+					}}));
+				}
+
+				this.ceilingMoving = true;
+
 				this.ceilingHeight += delta * this.moveSpeed * Math.sign(this.targetCeilingHeight - this.ceilingHeight);
 			}
 
 			this.moveGeometry();
 		}
-		else if(this.ceilingHeight !== this.originalCeilingHeight)
+		else
 		{
-			this.targetCeilingHeight = this.originalCeilingHeight;
-			this.timer = 60;
+			if(this.ceilingMoving)
+			{
+				this.dispatchEvent(new CustomEvent('ceiling-stop', {detail: {
+					original: this.originalCeilingHeight,
+					height:   this.ceilingHeight,
+					target:   this.targetCeilingHeight,
+				}}));
+
+				this.ceilingHeight = this.targetCeilingHeight;
+				this.ceilingMoving = false;
+
+			}
+
+			if(this.ceilingHeight !== this.originalCeilingHeight && this.closeTime > 0)
+			{
+				this.targetCeilingHeight = this.originalCeilingHeight;
+				this.timer = this.closeTime;
+			}
+		}
+
+		if(this.floorHeight !== this.targetFloorHeight)
+		{
+			for(const thing of this.things)
+			{
+				thing.position.y = this.floorHeight + thing.userData.height / 2;
+			}
+
+			if(Math.abs(this.targetFloorHeight - this.floorHeight) < delta * this.moveSpeed)
+			{
+				this.dispatchEvent(new CustomEvent('floor-stop', {detail: {
+					original: this.originalFloorHeight,
+					height:   this.floorHeight,
+					target:   this.targetFloorHeight,
+				}}));
+
+				this.floorHeight = this.targetFloorHeight;
+				this.floorMoving = false;
+			}
+			else
+			{
+				if(!this.floorMoving)
+				{
+					this.dispatchEvent(new CustomEvent('floor-start', {detail: {
+						original: this.originalFloorHeight,
+						height:   this.floorHeight,
+						target:   this.targetFloorHeight,
+					}}));
+				}
+
+				this.floorMoving = true;
+
+				this.floorHeight += delta * this.moveSpeed * Math.sign(this.targetFloorHeight - this.floorHeight);
+			}
+
+			this.moveGeometry();
+		}
+		else
+		{
+			if(this.floorMoving)
+			{
+				this.dispatchEvent(new CustomEvent('floor-stop', {detail: {
+					original: this.originalFloorHeight,
+					height:   this.floorHeight,
+					target:   this.targetFloorHeight,
+				}}));
+
+				this.floorHeight = this.targetFloorHeight;
+				this.floorMoving = false;
+
+			}
+
+			if(this.floorHeight !== this.originalFloorHeight && this.closeTime > 0)
+			{
+				this.targetFloorHeight = this.originalFloorHeight;
+				this.timer = this.closeTime;
+				// if(!this.things.size)
+				// {
+				// }
+				// else
+				// {
+				// 	this.timer = 10;
+				// }
+			}
 		}
 	}
 
-	openDoor()
+	changeLightLevel(level)
 	{
-		if(this.timer)
+
+	}
+
+	openDoor(closeTime)
+	{
+		if(this.timer || this.ceilingHeight !== this.targetCeilingHeight)
 		{
-			return;
+			return false;
 		}
+
+		this.closeTime = closeTime * 1000;
 
 		let lowest = Infinity;
 
@@ -113,24 +601,132 @@ class Room
 			if(neighbor.ceilingHeight < lowest)
 			{
 				this.targetCeilingHeight = lowest = neighbor.ceilingHeight;
-				this.timer = 15;
+				this.timer = 10;
 			}
 		}
+
+		this.targetCeilingHeight -= 4;
+
+		return true;
 	}
 
 	closeDoor()
 	{
-		if(this.timer)
+		if(this.timer || this.ceilingHeight !== this.targetCeilingHeight)
 		{
-			return;
+			return false;
 		}
 
 		this.targetCeilingHeight = this.originalCeilingHeight;
+
+		return true;
+	}
+
+	lowerCeiling(modifier, time)
+	{
+		this.targetCeilingHeight = this.floorHeight;
+	}
+
+	lowerLift(action)
+	{
+		if(this.timer || this.ceilingHeight !== this.targetCeilingHeight)
+		{
+			return false;
+		}
+
+		const time = action.tm > 0 ? action.tm : 6;
+
+		this.closeTime = time * 1000;
+
+		let highest = Infinity;
+
+		for(const neighbor of this.neighbors)
+		{
+			if(neighbor.floorHeight < highest && neighbor.floorHeight < this.floorHeight && neighbor.index !== this.index)
+			{
+				this.targetFloorHeight = highest = neighbor.floorHeight;
+				this.timer = 10;
+			}
+		}
+
+		return true;
+	}
+
+	raiseFloor(action)
+	{
+		const time = action.tm > 0 ? action.tm : 6;
+
+		if(this.timer || this.ceilingHeight !== this.targetCeilingHeight)
+		{
+			return false;
+		}
+
+		this.closeTime = time * 1000;
+
+		let highest = Infinity;
+
+		for(const neighbor of this.neighbors)
+		{
+			if(neighbor.floorHeight < highest && neighbor.floorHeight > this.floorHeight && neighbor.index !== this.index)
+			{
+				this.targetFloorHeight = highest = neighbor.floorHeight;
+				this.timer = 10;
+			}
+		}
+
+		return true;
+	}
+
+	raiseCeiling(action)
+	{
+		const time = action.tm > 0 ? action.tm : 6;
+
+		if(this.timer || this.ceilingHeight !== this.targetCeilingHeight)
+		{
+			return false;
+		}
+
+		this.closeTime = time * 1000;
+
+		let highest = -Infinity;
+
+		for(const neighbor of this.neighbors)
+		{
+			if(neighbor.ceilingHeight > highest && neighbor.ceilingHeight > this.ceilingHeight && neighbor.index !== this.index)
+			{
+				this.targetFloorHeight = highest = neighbor.floorHeight;
+				this.timer = 10;
+			}
+		}
+
+		return true;
 	}
 
 	moveCeiling(to)
 	{
 		this.targetCeilingHeight = to;
+	}
+
+	raiseStaircase(action, step = 0)
+	{
+		this.targetFloorHeight = this.originalFloorHeight + (step + 1)  * 8;
+
+		let next = null;
+
+		for(const linedef of this.linedefs)
+		{
+			const left = linedef.left > -1 && this.level.map.sidedef(linedef.left);
+
+			if(!left) continue;
+			const lSector = left && map.sector(left.sector);
+
+			if(lSector && lSector.index !== this.index && lSector.floorFlat === this.floorFlat)
+			{
+				next = this.level.rooms.get(left.sector);
+				next && next.raiseStaircase(action, step + 1);
+				break;
+			}
+		}
 	}
 
 	moveGeometry()
@@ -140,14 +736,19 @@ class Room
 			plane.position.y =  this.ceilingHeight - this.originalCeilingHeight;
 		}
 
+		for(const plane of this.floorPlanes)
+		{
+			plane.position.y =  this.floorHeight - this.originalFloorHeight;
+		}
+
 		for(const plane of this.middlePlanes)
 		{
 			const originalHeight = plane.userData.textureHeight;
 			const rSector = plane.userData.rSector;
 			const lSector = plane.userData.lSector;
 
-			const rRoom = rooms.get(rSector.index);
-			const lRoom = lSector && rooms.get(lSector.index);
+			const rRoom = this.level.rooms.get(rSector.index);
+			const lRoom = lSector && this.level.rooms.get(lSector.index);
 
 			const maxFloor   = !lRoom ? rRoom.floorHeight   : Math.max(rRoom.floorHeight,   lRoom.floorHeight);
 			const minCeiling = !lRoom ? rRoom.ceilingHeight : Math.min(rRoom.ceilingHeight, lRoom.ceilingHeight);
@@ -164,18 +765,27 @@ class Room
 			const originalHeight = plane.userData.textureHeight;
 			const rSector = plane.userData.rSector;
 			const lSector = plane.userData.lSector;
+			const sector  = plane.userData.sector;
 
-			const rRoom = rooms.get(rSector.index);
-			const lRoom = lSector && rooms.get(lSector.index);
+			const rRoom = this.level.rooms.get(rSector.index);
+			const lRoom = lSector && this.level.rooms.get(lSector.index);
+			const room  = level.rooms.get(sector.index);
 
-			const maxFloor   = !lRoom ? rRoom.floorHeight   : Math.max(rRoom.floorHeight,   lRoom.floorHeight);
-			const minFloor   = !lRoom ? rRoom.floorHeight   : Math.min(rRoom.floorHeight,   lRoom.floorHeight);
+			const height  = room.ceilingHeight - room.floorHeight;
 
-			const lowerHeight  = maxFloor   - minFloor;
+			const maxFloor   = !lRoom ? rRoom.floorHeight : Math.max(rRoom.floorHeight, lRoom.floorHeight);
+			const minFloor   = !lRoom ? rRoom.floorHeight : Math.min(rRoom.floorHeight, lRoom.floorHeight);
+
+			const lowerHeight  = maxFloor - minFloor;
 
 			plane.material.map.repeat.y = lowerHeight / originalHeight;
 			plane.position.y = lowerHeight/2 + minFloor;
 			plane.scale.y = lowerHeight;
+
+			if(plane.userData.lowerUnpegged)
+			{
+				plane.material.map.offset.y = (plane.userData.yOffset + -height + originalHeight) / originalHeight;
+			}
 		}
 
 		for(const plane of this.upperPlanes)
@@ -184,8 +794,8 @@ class Room
 			const rSector = plane.userData.rSector;
 			const lSector = plane.userData.lSector;
 
-			const rRoom = rooms.get(rSector.index);
-			const lRoom = lSector && rooms.get(lSector.index);
+			const rRoom = this.level.rooms.get(rSector.index);
+			const lRoom = lSector && this.level.rooms.get(lSector.index);
 
 			const maxFloor   = !lRoom ? rRoom.floorHeight   : Math.max(rRoom.floorHeight,   lRoom.floorHeight);
 			const minCeiling = !lRoom ? rRoom.ceilingHeight : Math.min(rRoom.ceilingHeight, lRoom.ceilingHeight);
@@ -203,6 +813,11 @@ class Room
 	{
 		this.linedefs.add(linedef);
 
+		if([11].includes(linedef.action) && isLeftWall)
+		{
+			// this.isSwitch = true;
+		}
+
 		if([1,26,27,28,31].includes(linedef.action) && isLeftWall)
 		{
 			this.isDoor = true;
@@ -210,7 +825,7 @@ class Room
 
 		if([2,90,103].includes(linedef.action))
 		{
-			for(const other of tags.get(linedef.tag))
+			for(const other of this.level.tags.get(linedef.tag))
 			{
 				other.isDoor = true;
 			}
@@ -225,7 +840,7 @@ class Room
 		const lSector = left && map.sector(left.sector);
 		const sector  = this.sector;
 		const other   = isLeftWall ? rSector : lSector;
-		const oRoom   = other && other.index !== this.index && rooms.get(other.index);
+		const oRoom   = other && other.index !== this.index && this.level.rooms.get(other.index);
 
 		oRoom && this.neighbors.add(oRoom);
 
@@ -253,42 +868,78 @@ class Room
 		const lowerHeight  = maxFloor   - minFloor;
 		const upperHeight  = maxCeiling - minCeiling;
 
+		const wall = {middle: null, lower: null, upper: null};
+
+		this.walls.set(linedef.index, wall);
+
 		if(isTextureName(sidedef.middle))
 		{
-			const texture = await loadTexture(this.sector.map.wad, sidedef.middle, light);
-			const wadTexture = texture.userData.wadTexture;
+			if(!textures.has(sidedef.middle))
+			{
+				textures.set(sidedef.middle, new Map);
+			}
 
+			if(!textures.get(sidedef.middle).has(this.lightLevel))
+			{
+				const texture = await loadTexture(wad, sidedef.middle, light);
+
+				textures.get(sidedef.middle).set(this.lightLevel, texture);
+			}
+
+			const texture = textures.get(sidedef.middle).get(this.lightLevel).clone();
+
+			const wadTexture = texture.userData.wadTexture;
 			const material = new THREE.MeshBasicMaterial({map: texture});
 			const geometry = new THREE.PlaneGeometry(length, 1, 1);
 			const plane = new THREE.Mesh(geometry, material);
 
+			wall.middle = plane;
+
+			plane.userData.textureName = sidedef.middle;
 			plane.userData.textureHeight = middleHeight;
 			plane.scale.y = middleHeight;
+			this.level.planes++;
 
 			if(wadTexture)
 			{
 				material.transparent = wadTexture.transparent;
 
+				if(wadTexture.transparent) this.level.transparentPlanes++;
+
 				const hRepeat = length / wadTexture.width;
 				const vRepeat = middleHeight / wadTexture.height;
 
-				texture.repeat.set(hRepeat, vRepeat);
 				plane.userData.textureHeight = wadTexture.height;
+				plane.userData.repeat = [hRepeat, vRepeat];
 
 				if(lowerUnpegged)
 				{
-					texture.offset.set(
+					plane.userData.center = [0, 0];
+					plane.userData.offset = [
 						right.xOffset / wadTexture.width,
-						(wadTexture.height + -right.yOffset) / wadTexture.height
-					);
+						(wadTexture.height + -right.yOffset) / wadTexture.height,
+					];
 				}
 				else
 				{
-					texture.offset.set(
+					plane.userData.center = [0, 1];
+					plane.userData.offset = [
 						right.xOffset / wadTexture.width,
-						(wadTexture.height + -middleHeight + -right.yOffset) / wadTexture.height
-					);
+						(wadTexture.height + -right.yOffset) / wadTexture.height,
+						// (wadTexture.height + -middleHeight + -right.yOffset) / wadTexture.height
+					];
 				}
+
+				this.alignTexture(plane, texture);
+
+				if(wadTexture.animation)
+				{
+					this.setupWallAnimation(plane, wadTexture.animation, light);
+				}
+			}
+			else
+			{
+				texture.repeat.set(length / 64, middleHeight / 64);
 			}
 
 			plane.position.x = xCenter;
@@ -299,47 +950,82 @@ class Room
 			plane.userData.rSector = rSector;
 			plane.userData.lSector = lSector;
 
+
 			this.middlePlanes.add(plane);
-			oRoom && oRoom.middlePlanes.add(plane);
+			if(oRoom) oRoom.middlePlanes.add(plane);
+			if(!isLeftWall) this.innerPlanes.add(plane);
 			this.scene.add(plane);
 		}
 
 		if(isTextureName(sidedef.lower))
 		{
-			const texture = await loadTexture(wad, sidedef.lower, light);
+			if(!textures.has(sidedef.lower))
+			{
+				textures.set(sidedef.lower, new Map);
+			}
+
+			if(!textures.get(sidedef.lower).has(this.lightLevel))
+			{
+				const texture = await loadTexture(wad, sidedef.lower, light);
+
+				textures.get(sidedef.lower).set(this.lightLevel, texture);
+			}
+
+			const texture = textures.get(sidedef.lower).get(this.lightLevel).clone();
+
+			const wadTexture = texture.userData.wadTexture;
 			const material = new THREE.MeshBasicMaterial({map: texture});
 			const geometry = new THREE.PlaneGeometry(length, 1, 1);
-			const wadTexture = texture.userData.wadTexture;
 			const plane = new THREE.Mesh(geometry, material);
 
+			wall.lower = plane;
+
+			plane.userData.textureName = sidedef.lower;
+			plane.userData.lowerUnpegged = lowerUnpegged;
 			plane.userData.textureHeight = lowerHeight;
+			plane.userData.sector = sector;
 			plane.scale.y = lowerHeight;
+			this.level.planes++;
 
 			if(wadTexture)
 			{
 				material.transparent = wadTexture.transparent;
 
+				if(wadTexture.transparent) this.level.transparentPlanes++;
+
 				const hRepeat = length / wadTexture.width;
 				const vRepeat = lowerHeight / wadTexture.height;
-				texture.repeat.set(hRepeat, vRepeat);
+				plane.userData.repeat = [hRepeat, vRepeat];
 				plane.userData.textureHeight = wadTexture.height;
+				plane.userData.yOffset = sidedef.yOffset;
 
-				if(!lowerUnpegged)
+				if(lowerUnpegged)
 				{
-					texture.center.set(0, 1);
-					texture.offset.set(
+					plane.userData.center = [0, 0];
+					plane.userData.offset = [
 						sidedef.xOffset / wadTexture.width,
-						-sidedef.yOffset / wadTexture.height
-					);
+						(sidedef.yOffset + -height + wadTexture.height) / wadTexture.height
+					];
 				}
 				else
 				{
-					texture.center.set(0, 0);
-					texture.offset.set(
+					plane.userData.center = [0, 1];
+					plane.userData.offset = [
 						sidedef.xOffset / wadTexture.width,
-						(sidedef.yOffset + -height + wadTexture.height) / wadTexture.height
-					);
+						-sidedef.yOffset / wadTexture.height
+					];
 				}
+
+				this.alignTexture(plane, texture);
+
+				if(wadTexture.animation)
+				{
+					this.setupWallAnimation(plane, wadTexture.animation, light);
+				}
+			}
+			else
+			{
+				texture.repeat.set(length / 64, lowerHeight / 64);
 			}
 
 			plane.position.x = xCenter;
@@ -351,7 +1037,8 @@ class Room
 			plane.userData.lSector = lSector;
 
 			this.lowerPlanes.add(plane);
-			oRoom && oRoom.lowerPlanes.add(plane);
+			if(oRoom) oRoom.lowerPlanes.add(plane);
+			if(!isLeftWall) this.innerPlanes.add(plane);
 			scene.add(plane);
 		}
 
@@ -360,71 +1047,68 @@ class Room
 
 		if(!(rSky && lSky) && isTextureName(sidedef.upper))
 		{
-			const texture = await loadTexture(wad, sidedef.upper, light);
+			if(!textures.has(sidedef.upper))
+			{
+				textures.set(sidedef.upper, new Map);
+			}
+
+			if(!textures.get(sidedef.upper).has(this.lightLevel))
+			{
+				const texture = await loadTexture(wad, sidedef.upper, light);
+
+				textures.get(sidedef.upper).set(this.lightLevel, texture);
+			}
+
+			const texture = textures.get(sidedef.upper).get(this.lightLevel).clone();
+
+			const wadTexture = texture.userData.wadTexture;
 			const material = new THREE.MeshBasicMaterial({map: texture});
 			const geometry = new THREE.PlaneGeometry(length, 1, 1);
-			const wadTexture = texture.userData.wadTexture;
 			const plane = new THREE.Mesh(geometry, material);
 
+			wall.upper = plane;
+
+			plane.userData.textureName = sidedef.upper;
 			plane.userData.textureHeight = upperHeight;
 			plane.scale.y = upperHeight;
+			this.level.planes++;
 
 			if(wadTexture)
 			{
 				material.transparent = wadTexture.transparent;
 
+				if(wadTexture.transparent) this.level.transparentPlanes++;
+
 				const hRepeat = length / wadTexture.width;
 				const vRepeat = upperHeight / wadTexture.height;
-				texture.repeat.set(hRepeat, vRepeat);
+
 				plane.userData.textureHeight = wadTexture.height;
+				plane.userData.repeat = [hRepeat, vRepeat];
 
 				if(upperUnpegged)
 				{
-					texture.center.set(0, 1);
+					plane.userData.center = [0, 1];
+				}
+				else
+				{
+					plane.userData.center = [0, 0];
 				}
 
-				texture.offset.set(
+				plane.userData.offset = [
 					sidedef.xOffset / wadTexture.width,
 					-sidedef.yOffset / wadTexture.height
-				);
+				];
+
+				this.alignTexture(plane, texture);
 
 				if(wadTexture.animation)
 				{
-					animatedWalls.add(plane);
-
-					plane.userData.animation = wadTexture.animation;
-					plane.userData.age = 0;
-
-					const frameNames = wad.textureAnimation(wadTexture.animation);
-					const frames = [];
-
-					for(const frameName of frameNames)
-					{
-						const wadTexture = wad.texture(frameName);
-						const url  = await wadTexture.decode(light);
-						const texture = textureLoader.load(url);
-
-						if(upperUnpegged)
-						{
-							texture.center.set(0, 1);
-						}
-
-						texture.repeat.set(hRepeat, vRepeat);
-
-						texture.offset.set(
-							sidedef.xOffset / wadTexture.width,
-							-sidedef.yOffset / wadTexture.height
-						);
-
-						texture.wrapS = THREE.RepeatWrapping;
-						texture.wrapT = THREE.RepeatWrapping;
-						texture.colorSpace = THREE.SRGBColorSpace;
-
-						frames.push(texture);
-					}
-
-					plane.userData.frames = frames;
+					this.setupWallAnimation(plane, wadTexture.animation, light);
 				}
+			}
+			else
+			{
+				texture.repeat.set(length / 64, lowerHeight / 64);
 			}
 
 			plane.position.x = xCenter;
@@ -436,119 +1120,258 @@ class Room
 			plane.userData.lSector = lSector;
 
 			this.upperPlanes.add(plane);
-			oRoom && oRoom.upperPlanes.add(plane);
+			if(oRoom) oRoom.upperPlanes.add(plane);
+			if(!isLeftWall) this.innerPlanes.add(plane);
 			scene.add(plane);
 		}
 	}
 
-	async addFlats(glSubsector)
+	alignTexture(plane, texture)
+	{
+		texture.center.set(...plane.userData.center);
+		texture.offset.set(...plane.userData.offset);
+		texture.repeat.set(...plane.userData.repeat);
+	}
+
+	async changeWallTexture(plane, textureName, lightLevel)
+	{
+		const wadTexture = wad.texture(textureName);
+		const url  = await wadTexture.decode(lightLevel);
+		// const texture = textureLoader.load(url);
+
+		if(!textures.has(textureName))
+		{
+			textures.set(textureName, new Map);
+		}
+
+		if(!textures.get(textureName).has(this.lightLevel))
+		{
+			const texture = textureLoader.load(url);
+
+			textures.get(textureName).set(this.lightLevel, texture);
+		}
+
+		const texture = textures.get(textureName).get(this.lightLevel).clone();
+
+		this.alignTexture(plane, texture);
+
+		texture.wrapS = THREE.RepeatWrapping;
+		texture.wrapT = THREE.RepeatWrapping;
+		texture.magFilter = THREE.NearestFilter;
+		texture.colorSpace = THREE.SRGBColorSpace;
+
+		plane.material.map = texture;
+		plane.material.needsUpdate = true;
+	}
+
+	async setupWallAnimation(plane, animation, lightLevel)
+	{
+		this.level.animatedWalls.add(plane);
+
+		plane.userData.animation = animation;
+		plane.userData.age = 0;
+
+		const frameNames = wad.textureAnimation(animation);
+		const frames = [];
+
+		if(frameNames)
+		for(const frameName of frameNames)
+		{
+			const wadTexture = wad.texture(frameName);
+			const url  = await wadTexture.decode(lightLevel);
+			// const texture = textureLoader.load(url);
+
+			if(!textures.has(frameName))
+			{
+				textures.set(frameName, new Map);
+			}
+
+			if(!textures.get(frameName).has(this.lightLevel))
+			{
+				const texture = textureLoader.load(url);
+
+				textures.get(frameName).set(this.lightLevel, texture);
+			}
+
+			const texture = textures.get(frameName).get(this.lightLevel).clone();
+
+			this.alignTexture(plane, texture);
+
+			texture.wrapS = THREE.RepeatWrapping;
+			texture.wrapT = THREE.RepeatWrapping;
+			texture.magFilter = THREE.NearestFilter;
+			texture.colorSpace = THREE.SRGBColorSpace;
+
+			frames.push(texture);
+		}
+
+		plane.userData.frames = frames;
+	}
+
+	async addFlats(glSubsectors)
 	{
 		const sector = this.sector;
 
 		const lightLevel = 33 - Math.trunc(sector.lightLevel / 8);
 
-		const original = glSubsector.vertexes();
-		const vertexes = original.map(v => flipVertex(map, v));
-		const Vector2s = vertexes.map(v => new THREE.Vector2(v.x, v.y));
-		const backward = [...Vector2s].reverse();
+		const ceilingGeos = [];
+		const floorGeos = [];
 
-		const floorShape = new THREE.Shape(Vector2s);
-		const ceilingShape = new THREE.Shape(backward);
+		for(const glSubsector of glSubsectors)
+		{
+			const original = glSubsector.vertexes();
+			const vertexes = original.map(v => flipVertex(map, v));
+			const Vector2s = vertexes.map(v => new THREE.Vector2(v.x, v.y));
+			const backward = [...Vector2s].reverse();
+
+			const floorShape = new THREE.Shape(Vector2s);
+			const ceilingShape = new THREE.Shape(backward);
+
+			const floorGeometry = new THREE.ShapeGeometry(floorShape);
+
+			floorGeometry.setAttribute('position', new THREE.Float32BufferAttribute(
+				vertexes.map(vertex => [vertex.x, sector.floorHeight, vertex.y]).flat(), 3
+			));
+
+			const ceilingGeometry = new THREE.ShapeGeometry(ceilingShape);
+
+			ceilingGeometry.setAttribute('position', new THREE.Float32BufferAttribute(
+				backward.map(vertex => [vertex.x, sector.ceilingHeight, vertex.y]).flat(), 3
+			));
+
+			floorGeos.push(floorGeometry);
+			ceilingGeos.push(ceilingGeometry);
+		}
+
+		const floorGeometry = BufferGeometryUtils.mergeGeometries(floorGeos);
+		const ceilingGeometry = BufferGeometryUtils.mergeGeometries(ceilingGeos);
 
 		const loader = wad.loader || wad;
 
-		const floorFlat   = loader.flat(sector.floorFlat);
-		const ceilingFlat = loader.flat(sector.ceilingFlat);
+		const pos = floorGeometry.attributes.position;
+		const box = new THREE.Box3().setFromBufferAttribute(pos);
+		const size = new THREE.Vector3();
+		box.getSize(size);
 
-		const floorGeometry = new THREE.ShapeGeometry(floorShape);
-		floorGeometry.setAttribute('position', new THREE.Float32BufferAttribute(
-			vertexes.map(vertex => [vertex.x, sector.floorHeight, vertex.y]).flat(), 3
-		));
+		const floorFlat   = loader.flat(sector.floorFlat)   || loader.texture(sector.floorFlat);
+		const ceilingFlat = loader.flat(sector.ceilingFlat) || loader.texture(sector.ceilingFlat);
 
-		const ceilingGeometry = new THREE.ShapeGeometry(ceilingShape);
-		ceilingGeometry.setAttribute('position', new THREE.Float32BufferAttribute(
-			backward.map(vertex => [vertex.x, sector.ceilingHeight, vertex.y]).flat(), 3
-		));
-
-		const floorTexture   = textureLoader.load(await floorFlat.decode(lightLevel));
-		const ceilingTexture = textureLoader.load(await ceilingFlat.decode(lightLevel));
-
-		floorTexture.magFilter   = THREE.NearestFilter;
-		ceilingTexture.magFilter = THREE.NearestFilter;
-
-		if(lowRes)
+		if(!textures.has(sector.floorFlat))
 		{
-			floorTexture.minFilter   = THREE.NearestFilter;
-			ceilingTexture.minFilter = THREE.NearestFilter;
+			textures.set(sector.floorFlat, new Map);
 		}
 
-		floorTexture.colorSpace   = THREE.SRGBColorSpace;
-		ceilingTexture.colorSpace = THREE.SRGBColorSpace;
+		if(!textures.has(sector.ceilingFlat))
+		{
+			textures.set(sector.ceilingFlat, new Map);
+		}
 
-		floorTexture.wrapS   = THREE.RepeatWrapping;
-		floorTexture.wrapT   = THREE.RepeatWrapping;
-		ceilingTexture.wrapS = THREE.RepeatWrapping;
-		ceilingTexture.wrapT = THREE.RepeatWrapping;
+		if(!textures.get(sector.floorFlat).has(lightLevel))
+		{
+			const floorTexture = floorFlat ? textureLoader.load(await floorFlat.decode(lightLevel)) : missing.clone();
+			if(lowRes) floorTexture.minFilter = THREE.NearestFilter;
+			floorTexture.magFilter = THREE.NearestFilter;
+			floorTexture.colorSpace = THREE.SRGBColorSpace;
+			floorTexture.wrapS = THREE.RepeatWrapping;
+			floorTexture.wrapT = THREE.RepeatWrapping;
+			textures.get(sector.floorFlat).set(lightLevel, floorTexture);
+		}
 
-		const bounds = glSubsector.bounds;
+		if(!textures.get(sector.ceilingFlat).has(lightLevel))
+		{
+			const ceilingTexture = ceilingFlat ? textureLoader.load(await ceilingFlat.decode(lightLevel))  : missing.clone();
+			if(lowRes) ceilingTexture.minFilter = THREE.NearestFilter;
+			ceilingTexture.magFilter = THREE.NearestFilter;
+			ceilingTexture.colorSpace = THREE.SRGBColorSpace;
+			ceilingTexture.wrapS = THREE.RepeatWrapping;
+			ceilingTexture.wrapT = THREE.RepeatWrapping;
+			textures.get(sector.ceilingFlat).set(lightLevel, ceilingTexture);
+		}
 
-		floorTexture.repeat.set(bounds.width / 64, bounds.height / 64);
-		ceilingTexture.repeat.set(bounds.width / 64, bounds.height / 64);
+		const floorTexture = textures.get(sector.floorFlat).get(lightLevel).clone();
+		const ceilingTexture = textures.get(sector.ceilingFlat).get(lightLevel).clone();
 
-		const floorMaterial   = new THREE.MeshBasicMaterial({map: floorTexture});
-		const ceilingMaterial = new THREE.MeshBasicMaterial({map: ceilingTexture});
+		floorTexture.repeat.set(size.x / 64, size.z / 64);
+		ceilingTexture.repeat.set(size.x / 64, size.z / 64);
+
+		const floorMaterial   = new THREE.MeshBasicMaterial({map: floorTexture,   transparent: false});
+		const ceilingMaterial = new THREE.MeshBasicMaterial({map: ceilingTexture, transparent: false});
 
 		const floor   = new THREE.Mesh(floorGeometry, floorMaterial);
 		const ceiling = new THREE.Mesh(ceilingGeometry, ceilingMaterial);
 
-		if(floorFlat.animation)
+		if(floorFlat && floorFlat.animation)
 		{
-			animatedFlats.add(floor);
-
 			floor.userData.animation = floorFlat.animation;
 			floor.userData.age = 0;
-			animatedFlats.add(floor);
+			this.level.animatedFlats.add(floor);
 
 			const frameNames = wad.flatAnimation(floorFlat.animation);
 			const frames = [];
 
+			if(frameNames)
 			for(const frameName of frameNames)
 			{
 				const flat = wad.flat(frameName);
 				const url  = await flat.decode(lightLevel);
-				const texture = textureLoader.load(url)
-				texture.repeat.set(bounds.width / 64, bounds.height / 64);
-				texture.wrapS = THREE.RepeatWrapping;
-				texture.wrapT = THREE.RepeatWrapping;
-				texture.colorSpace = THREE.SRGBColorSpace;
 
+				if(!textures.has(frameName))
+				{
+					textures.set(frameName, new Map);
+				}
+
+				if(!textures.get(frameName).has(this.lightLevel))
+				{
+					const texture = textureLoader.load(url);
+
+					texture.colorSpace = THREE.SRGBColorSpace;
+					texture.wrapS = THREE.RepeatWrapping;
+					texture.wrapT = THREE.RepeatWrapping;
+
+					textures.get(frameName).set(this.lightLevel, texture);
+				}
+
+				const texture = textures.get(frameName).get(this.lightLevel).clone();
+				texture.repeat.set(size.x / 64, size.z / 64);
 				frames.push(texture);
 			}
 
 			floor.userData.frames = frames;
 		}
 
-		if(ceilingFlat.animation)
+		if(ceilingFlat && ceilingFlat.animation)
 		{
-			animatedFlats.add(ceiling);
-
 			ceiling.userData.animation = ceilingFlat.animation;
 			ceiling.userData.age = 0;
-			animatedFlats.add(ceiling);
+			this.level.animatedFlats.add(ceiling);
 
 			const frameNames = wad.flatAnimation(ceilingFlat.animation);
 			const frames = [];
 
+			if(frameNames)
 			for(const frameName of frameNames)
 			{
 				const flat = wad.flat(frameName);
 				const url  = await flat.decode(lightLevel);
-				const texture = textureLoader.load(url)
-				texture.repeat.set(bounds.width / 64, bounds.height / 64);
-				texture.wrapS = THREE.RepeatWrapping;
-				texture.wrapT = THREE.RepeatWrapping;
-				texture.colorSpace = THREE.SRGBColorSpace;
 
+				if(!textures.has(frameName))
+				{
+					textures.set(frameName, new Map);
+				}
+
+				if(!textures.get(frameName).has(this.lightLevel))
+				{
+					const texture = textureLoader.load(url);
+
+					texture.colorSpace = THREE.SRGBColorSpace;
+					texture.wrapS = THREE.RepeatWrapping;
+					texture.wrapT = THREE.RepeatWrapping;
+
+					textures.get(frameName).set(this.lightLevel, texture);
+				}
+
+				const texture = textures.get(frameName).get(this.lightLevel).clone();
+				texture.repeat.set(size.x / 64, size.z / 64);
 				frames.push(texture);
 			}
 
@@ -560,8 +1383,8 @@ class Room
 		let yfOffset = map.bounds.height % 64;
 		let ycOffset = map.bounds.height % 64;
 
-		setUV(floorGeometry, xfOffset, yfOffset);
-		setUV(ceilingGeometry, xcOffset, ycOffset);
+		this.setUV(floorGeometry, xfOffset, yfOffset);
+		this.setUV(ceilingGeometry, xcOffset, ycOffset);
 
 		this.ceilingPlanes.add(ceiling);
 		this.floorPlanes.add(floor);
@@ -573,6 +1396,172 @@ class Room
 			this.scene.add(ceiling);
 		}
 	}
+
+	setUV(geometry, xOffset, yOffset)
+	{
+		const pos = geometry.attributes.position;
+		const box = new THREE.Box3().setFromBufferAttribute(pos);
+		const size = new THREE.Vector3();
+		box.getSize(size);
+
+		const uv = [];
+		const v3 = new THREE.Vector3();
+
+		for(let i = 0; i < pos.count; i++)
+		{
+			v3.fromBufferAttribute(pos, i);
+			v3.x += xOffset;
+			v3.z += yOffset;
+			v3.divide(size);
+			uv.push(v3.x, v3.z);
+		}
+
+		geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+	}
+
+	addThing(thing)
+	{
+		if(this.level.roomThings.has(thing))
+		{
+			const room = this.level.roomThings.get(thing);
+
+			room.things.delete(thing);
+		}
+
+		this.things.add(thing);
+	}
+
+	flipSwitch(linedef)
+	{
+		if(!linedef.actionMeta || this.switchesFlipped.has(linedef.index))
+		{
+			return;
+		}
+
+		this.switchesFlipped.add(linedef.index);
+		const wall = this.walls.get(linedef.index);
+
+		const middleSwitch = wall.middle && wall.middle.userData.textureName && wall.middle.userData.textureName.match(/^SW[12]/) && wall.middle.userData.textureName;
+		const lowerSwitch  = wall.lower  && wall.lower.userData.textureName  && wall.lower.userData.textureName.match(/^SW[12]/)  && wall.lower.userData.textureName;
+		const upperSwitch  = wall.upper  && wall.upper.userData.textureName  && wall.upper.userData.textureName.match(/^SW[12]/)  && wall.upper.userData.textureName;
+
+		if(middleSwitch)
+		{
+			const on  = (middleSwitch.substr(2, 1) === '2' ? 'SW1' : 'SW2');
+			const off = (middleSwitch.substr(2, 1) === '2' ? 'SW2' : 'SW1');
+
+			this.changeWallTexture(
+				wall.middle,
+				on + wall.middle.userData.textureName.substr(3),
+				(33 - Math.trunc(this.lightLevel / 8)),
+			);
+
+			const from = map.vertex(linedef.from);
+			const to   = map.vertex(linedef.to);
+
+			const xCenter = (from.x + to.x) * 0.5;
+			const yCenter = (from.y + to.y) * 0.5;
+
+			playSample(wad.sample('DSSWTCHN'), xCenter, yCenter).then(async () => {
+				await new Promise(a => setTimeout(a, 1500));
+
+				this.changeWallTexture(
+					wall.middle,
+					off + wall.middle.userData.textureName.substr(3),
+					(33 - Math.trunc(this.lightLevel / 8)),
+				);
+
+				playSample(wad.sample('DSSWTCHX'), xCenter, yCenter);
+				this.switchesFlipped.delete(linedef.index);
+			});
+		}
+
+		if(lowerSwitch)
+		{
+			const on  = (lowerSwitch.substr(2, 1) === '2' ? 'SW1' : 'SW2');
+			const off = (lowerSwitch.substr(2, 1) === '2' ? 'SW2' : 'SW1');
+
+			this.changeWallTexture(
+				wall.lower,
+				on + wall.lower.userData.textureName.substr(3),
+				(33 - Math.trunc(this.lightLevel / 8)),
+			);
+
+			playSample(wad.sample('DSSWTCHN')).then(async () => {
+				await new Promise(a => setTimeout(a, 1500));
+				this.changeWallTexture(
+					wall.lower,
+					off + wall.lower.userData.textureName.substr(3),
+					(33 - Math.trunc(this.lightLevel / 8)),
+				);
+				playSample(wad.sample('DSSWTCHX'));
+				this.switchesFlipped.delete(linedef.index);
+			});
+		}
+
+		if(upperSwitch)
+		{
+			const on  = (upperSwitch.substr(2, 1) === '2' ? 'SW1' : 'SW2');
+			const off = (upperSwitch.substr(2, 1) === '2' ? 'SW2' : 'SW1');
+
+			this.changeWallTexture(
+				wall.upper,
+				on + wall.upper.userData.textureName.substr(3),
+				(33 - Math.trunc(this.lightLevel / 8)),
+			);
+
+			playSample(wad.sample('DSSWTCHN')).then(async () => {
+				await new Promise(a => setTimeout(a, 1500));
+
+				this.changeWallTexture(
+					wall.upper,
+					off + wall.upper.userData.textureName.substr(3),
+					(33 - Math.trunc(this.lightLevel / 8)),
+				);
+
+				playSample(wad.sample('DSSWTCHX'));
+				this.switchesFlipped.delete(linedef.index);
+			});
+		}
+	}
+}
+
+const lineIntersectsLine = (x1a, y1a, x2a, y2a, x1b, y1b, x2b, y2b) => {
+	const ax = x2a - x1a;
+	const ay = y2a - y1a;
+
+	const bx = x2b - x1b;
+	const by = y2b - y1b;
+
+	const crossProduct = ax * by - ay * bx;
+
+	// Parallel Lines cannot intersect
+	if(crossProduct === 0)
+	{
+		return false;
+	}
+
+	const cx = x1b - x1a;
+	const cy = y1b - y1a;
+
+	// Is our point within the bounds of line a?
+	const d = (cx * ay - cy * ax) / crossProduct;
+	if(d < 0 || d > 1)
+	{
+		return false;
+	}
+
+	// Is our point within the bounds of line b?
+	const t = (cx * by - cy * bx) / crossProduct;
+	if(t < 0 || t > 1)
+	{
+		return false;
+	}
+
+	const x = x1a + t * ax;
+	const y = y1a + t * ay;
+
+	return [x, y, t];
 }
 
 const nearestPointOnLine = (px, py, x1, y1, x2, y2, clamped = false) => {
@@ -611,128 +1600,264 @@ const rayLinedefs = (map, x, y, angle, distance) => {
 	return blocks;
 };
 
-const setUV = (geometry, xOffset = 0, yOffset = 0) => {
-	const pos = geometry.attributes.position;
-	const box = new THREE.Box3().setFromBufferAttribute(pos);
-	const size = new THREE.Vector3();
-	box.getSize(size);
+const samplesPlaying = new Map;
+const audioCtx = new (AudioContext || webkitAudioContext);
 
-	const uv = [];
-	const v3 = new THREE.Vector3();
-
-	for(let i = 0; i < pos.count; i++)
+const playSample = (sample, xPosition, yPosition) => {
+	if(!sample)
 	{
-		v3.fromBufferAttribute(pos, i);
-		v3.x += xOffset;
-		v3.z += yOffset;
-		v3.divide(size);
-		uv.push(v3.x, v3.z);
+		console.warn('Invalid sample.', sample);
+		return;
 	}
 
-	geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
-}
+	const buffer = audioCtx.createBuffer(1, sample.length, sample.rate);
+	const channelData = buffer.getChannelData(0);
 
-function lineIntersectsLine(x1a, y1a, x2a, y2a, x1b, y1b, x2b, y2b)
-{
-	const ax = x2a - x1a;
-	const ay = y2a - y1a;
-
-	const bx = x2b - x1b;
-	const by = y2b - y1b;
-
-	const crossProduct = ax * by - ay * bx;
-
-	// Parallel Lines cannot intersect
-	if(crossProduct === 0)
+	for(let i = 0; i < sample.length; i++)
 	{
-		return false;
+		channelData[i] = (sample.samples[i] - 128) / 128;
 	}
 
-	const cx = x1b - x1a;
-	const cy = y1b - y1a;
+	const source  = audioCtx.createBufferSource();
+	const stereo  = new StereoPannerNode(audioCtx, {pan: 0});
+	const gain    = new GainNode(audioCtx, {gain: 0.5});
+	source.buffer = buffer;
 
-	// Is our point within the bounds of line a?
-	const d = (cx * ay - cy * ax) / crossProduct;
-	if(d < 0 || d > 1)
+	source.connect(gain).connect(stereo).connect(audioCtx.destination);
+
+	source.start();
+
+	let accept;
+	const waiter = new Promise(a => accept = a);
+
+	source.addEventListener('ended', () => {
+		samplesPlaying.delete(sample);
+		accept();
+	}, {once: true});
+
+	samplesPlaying.set(buffer, {xPosition, yPosition, stereo, gain});
+
+	return waiter;
+};
+
+const runZdbsp = async (wadBuffer, mapName) => {
+	const zdbsp = await Zdbsp({
+		print: line => console.log(line),
+		printErr: line => {console.warn(line)},
+	});
+
+	zdbsp.FS.writeFile('/tmp/source.wad', new Uint8Array(wadBuffer));
+	const args = ['zdbsp', '-rg', '/tmp/source.wad', '-o', '/tmp/out.wad'];
+
+	const ptrs = args.map(part => {
+		const len = zdbsp.lengthBytesUTF8(part) + 1;
+		const loc = zdbsp._malloc(len);
+		zdbsp.stringToUTF8(part, loc, len);
+		return loc;
+	});
+
+	const arLoc = zdbsp._malloc(4 * ptrs.length);
+	try
 	{
-		return false;
-	}
+		for(const i in ptrs)
+		{
+			zdbsp.setValue(arLoc + 4 * i, ptrs[i], '*');
+		}
 
-	// Is our point within the bounds of line b?
-	const t = (cx * by - cy * bx) / crossProduct;
-	if(t < 0 || t > 1)
+		const process = zdbsp.ccall(
+			'main'
+			, 'number'
+			, ['number', 'number']
+			, [ptrs.length, arLoc]
+			, {async: true}
+		);
+
+		return zdbsp.FS.readFile('/tmp/out.wad');
+	}
+	catch(error)
 	{
-		return false;
+		if(typeof error === 'object' && (!('status' in error) || error.status !== 0))
+		{
+			throw error;
+		}
+		else
+		{
+			console.warn(error);
+		}
 	}
-
-	const x = x1a + t * ax;
-	const y = y1a + t * ay;
-
-	return [x, y, t];
-}
-
-const loadTexture = async (wad, name, lightLevel) => {
-	const wadTexture = wad.texture(name.toUpperCase());
-
-	if(wadTexture)
+	finally
 	{
-		const texture = textureLoader.load(await wadTexture.decode(lightLevel));
-
-		texture.userData.wadTexture = wadTexture
-		texture.magFilter = THREE.NearestFilter;
-		if(lowRes) texture.minFilter = THREE.NearestFilter;
-		texture.wrapS = THREE.RepeatWrapping;
-		texture.wrapT = THREE.RepeatWrapping;
-		texture.colorSpace = THREE.SRGBColorSpace;
-
-		return texture;
+		ptrs.forEach(p => zdbsp._free(p));
+		zdbsp._free(arLoc);
 	}
+};
 
-	return textureLoader.load('https://threejs.org/examples/textures/crate.gif');
-}
+const runGlbsp = async (wadBuffer) => {
+	const glbsp = await GlbspBinary({
+		print: line => console.log(line),
+		printErr: line => {console.warn(line)},
+	});
 
-const isTextureName = name => {
-	return name
-		&& name !== '-'
-		&& name !== 'AASTINKY'
-		&& name !== 'AASHITTY';
-}
+	glbsp.FS.writeFile('/tmp/bsp-source.wad', new Uint8Array(wadBuffer));
+	const args = ['glbsp', '-w', '-xr', '/tmp/bsp-source.wad', '-o', '/tmp/bsp-out.wad'];
 
-const animatedWalls = new Set;
-const animatedFlats = new Set;
+	const ptrs = args.map(part => {
+		const len = glbsp.lengthBytesUTF8(part) + 1;
+		const loc = glbsp._malloc(len);
+		glbsp.stringToUTF8(part, loc, len);
+		return loc;
+	});
 
-const rooms = new Map;
-const tags = new Map;
+	const arLoc = glbsp._malloc(4 * ptrs.length);
+	try
+	{
+		for(const i in ptrs)
+		{
+			glbsp.setValue(arLoc + 4 * i, ptrs[i], '*');
+		}
 
-async function setup()
-{
+		const process = glbsp.ccall(
+			'main'
+			, 'number'
+			, ['number', 'number']
+			, [ptrs.length, arLoc]
+			, {async: true}
+		);
+
+		return glbsp.FS.readFile('/tmp/bsp-out.wad');
+	}
+	catch(error)
+	{
+		if(typeof error === 'object' && (!('status' in error) || error.status !== 0))
+		{
+			throw error;
+		}
+		else
+		{
+			console.warn(error);
+		}
+	}
+	finally
+	{
+		ptrs.forEach(p => glbsp._free(p));
+		glbsp._free(arLoc);
+	}
+};
+
+const runGlvis = async (wadBuffer) => {
+	const glvis = await GlvisBinary({
+		print: line => console.log(line),
+		printErr: line => {console.warn(line)},
+	});
+
+	glvis.FS.writeFile('/tmp/vis-source.wad', new Uint8Array(wadBuffer));
+	const args = ['glvis', '-v', '-noreject', '/tmp/vis-source.wad'];
+
+	const ptrs = args.map(part => {
+		const len = glvis.lengthBytesUTF8(part) + 1;
+		const loc = glvis._malloc(len);
+		glvis.stringToUTF8(part, loc, len);
+		return loc;
+	});
+
+	const arLoc = glvis._malloc(4 * ptrs.length);
+	try
+	{
+		for(const i in ptrs)
+		{
+			glvis.setValue(arLoc + 4 * i, ptrs[i], '*');
+		}
+
+		const process = glvis.ccall(
+			'main'
+			, 'number'
+			, ['number', 'number']
+			, [ptrs.length, arLoc]
+			, {async: true}
+		);
+
+		return glvis.FS.readFile('/tmp/vis-source.wad');
+	}
+	catch(error)
+	{
+		if(typeof error === 'object' && (!('status' in error) || error.status !== 0))
+		{
+			throw error;
+		}
+		else
+		{
+			console.warn(error);
+		}
+	}
+	finally
+	{
+		ptrs.forEach(p => glvis._free(p));
+		glvis._free(arLoc);
+	}
+};
+
+let level;
+
+const setup = async () => {
 	console.time('setup');
 
-	let prefix = '/wads';
+	let prefix = '';
 
 	if(process.env.NODE_ENV === 'production')
 	{
-		prefix = '/doom-renderer/wads'
+		prefix = '/doom-renderer'
 	}
 
 	const query = new URLSearchParams(location.search);
 
-	const selectedWad = query.has('wad') ? query.get('wad') : 'DOOM1.GL.WAD';
+	let selectedWad = query.has('wad') ? query.get('wad') : null;
+
+	if(query.get('random-level'))
+	{
+		const wadIndex = await (await fetch(prefix + '/wads.json')).json();
+		const wadList = wadIndex.wads;
+		const randomIndex = Math.floor(Math.random() * wadList.length);
+		selectedWad = wadList[randomIndex].wad;
+	}
 
 	let wadUrl = new URL(selectedWad, location.origin);
 
 	if(wadUrl.origin === location.origin)
 	{
-		wadUrl = prefix + '/' + wadUrl.pathname.substr(1);
+		wadUrl = prefix + '/wads/' + wadUrl.pathname.substr(1);
 	}
 
-	wad = new WadLoader(
-		await (await fetch(prefix + '/DOOM1.GL.WAD')).arrayBuffer(),
-		await (await fetch(wadUrl)).arrayBuffer(),
-		// await (await fetch(CHEX)).arrayBuffer(),
-		// await (await fetch(HACKED)).arrayBuffer(),
-		// await (await fetch(SKULLTAG)).arrayBuffer(),
-	);
+	const iWadList = [
+		await (await fetch(prefix + '/wads/freedoom1.wad')).arrayBuffer(),
+		await (await fetch(prefix + '/wads/freedoom2.wad')).arrayBuffer(),
+		await (await fetch(prefix + '/wads/DOOM1.WAD')).arrayBuffer(),
+		// await (await fetch(prefix + '/wads/Skulltag-v097d5.wad')).arrayBuffer(),
+		// await (await fetch(prefix + '/wads/DOOM2.WAD')).arrayBuffer(),
+	];
+
+	const pWadList = [];
+
+	let randomMap = null;
+
+	if(selectedWad)
+	{
+		const bytes = await (await fetch(wadUrl)).arrayBuffer();
+		pWadList.push(bytes);
+
+		const pwad = new Wad(bytes);
+
+		if(query.get('random-level'))
+		{
+			const maps = pwad.findMaps();
+			const randomIndex = Math.floor(Math.random() * maps.length);
+			randomMap = maps[randomIndex];
+			console.log(randomMap);
+		}
+	}
+
+	const wadList = await Promise.all([...iWadList, ...pWadList]);
+
+	wad = new WadLoader(...wadList);
 
 	const mapsNames = wad.findMaps();
 
@@ -741,7 +1866,8 @@ async function setup()
 		throw new Error('No maps found.');
 	}
 
-	const selectedMap = query.has('map') ? query.get('map') : mapsNames[0];
+	const selectedLevel = query.has('level') ? query.get('level') : 0;
+	const selectedMap = query.has('map') ? query.get('map') : (randomMap || mapsNames[selectedLevel]);
 
 	if(!mapsNames.includes(selectedMap))
 	{
@@ -750,14 +1876,25 @@ async function setup()
 
 	map = wad.loadMap(selectedMap);
 
+	const mapData = map.splitMap(selectedMap);
+	const single = new Wad(mapData);
+
+	if(!single.getLumpByName('GL_NODES'))
+	{
+		const processedBsp = await runGlbsp( mapData );
+		const processedVis = await runGlvis(processedBsp);
+
+		wad.addPWad(processedVis);
+		map = wad.loadMap(selectedMap);
+	}
+
 	const bounds = map.bounds;
 
-	const lightLevel = 0;
-
-	let playerStart = {x:0, y:0, z:0, angle: 0};
+	let playerStart = {x: 0, y: 0, z: 0, angle: 0};
 
 	if(!query.has('start'))
 	{
+		let found = false;
 		for(let i = 0; i < map.thingCount; i++)
 		{
 			const thing = map.thing(i);
@@ -765,8 +1902,16 @@ async function setup()
 			if(thing.type === 1)
 			{
 				playerStart = thing;
+				found = true;
 				break;
 			}
+		}
+		if(!found)
+		{
+			// const center = unflipVertex(map, {x: map.bounds.xPosition, y: map.bounds.yPosition});
+			// console.log(center, map.bounds);
+			playerStart.x = map.bounds.xPosition;
+			playerStart.y = map.bounds.yPosition;
 		}
 	}
 	else
@@ -775,12 +1920,11 @@ async function setup()
 		playerStart = {x, y, z, angle: 90 + angle};
 	}
 
-	// Camera
 	// const fov    = 67.5;
 	const fov    = 45;
 	const aspect = window.innerWidth / window.innerHeight;
 	const near   = 0.1;
-	const far    = 20000;
+	const far    = 6400;
 
 	camera = new THREE.PerspectiveCamera(fov, aspect, near, far);
 
@@ -802,24 +1946,37 @@ async function setup()
 	const res = lowRes ? 1 / 8 : 1;
 
 	const canvas = document.querySelector('#c');
-	renderer = new THREE.WebGLRenderer( { canvas } );
+	renderer = new THREE.WebGLRenderer( { canvas, powerPreference: 'high-performance' } );
 	renderer.setClearColor(0xFFFFFF);
 	renderer.setPixelRatio( window.devicePixelRatio * res);
 	renderer.setSize(window.innerWidth * res, window.innerHeight * res);
+	render.autoClear = false;
+
 	document.body.appendChild( renderer.domElement );
 
 	window.addEventListener('resize', onWindowResize, false);
+	document.addEventListener('drop', onFileDropped, false);
 
-	// Controls.
 	controls = new PointerLockControls(camera, renderer.domElement);
-	document.addEventListener('click', () => controls.lock());
+
+	document.addEventListener('click', async () => {
+		controls.lock();
+
+		for(const lumpName of wad.lumpNames)
+		{
+			if(lumpName.substr(0, 2) === 'DS')
+			{
+				// console.log(lumpName);
+				// await playSample(wad.sample(lumpName));
+			}
+		}
+
+	});
 
 	controls.update();
 
-	// Adding controls to camera (expected by AMI image widgets).
 	camera.controls = controls;
 
-	// Scene.
 	scene = new THREE.Scene();
 
 	scene.add( controls.object );
@@ -874,115 +2031,15 @@ async function setup()
 	document.addEventListener('keydown', onKeyDown);
 	document.addEventListener('keyup', onKeyUp);
 
-	const loadRooms = Array(map.sectorCount).fill().map((_,k)=>k).map(async i => {
-		rooms.set(i, new Room(map.sector(i), scene));
-	});
-
-	const loadWalls = Array(map.linedefCount).fill().map((_,k)=>k).map(async i => {
-		const linedef = map.linedef(i);
-
-		const right   = map.sidedef(linedef.right);
-		const left    = linedef.left >= 0 ? map.sidedef(linedef.left) : false;
-
-		const rSector = map.sector(right.sector);
-		const lSector = left && map.sector(left.sector);
-
-		const rRoom   = rooms.get(rSector.index);
-		const lRoom   = lSector && rooms.get(lSector.index);
-
-		rRoom.addWall(linedef);
-		lRoom && lRoom.addWall(linedef, true);
-
-	});
-
-	const loadFloors = Array(map.glSubsectorCount).fill().map((_,k)=>k).map(async i => {
-		const glSubsector = map.glSubsector(i);
-		const room = rooms.get(glSubsector.sector);
-		room && room.addFlats(glSubsector);
-		if(!room)
-		{
-			console.warn(glSubsector);
-		}
-	});
-
-	const loadThings = Array(map.thingCount).fill().map((_,k)=>k).map(async i => {
-		const thing = map.thing(i);
-
-		if(thing.flags.multip || [2,3,4,10,12,15,24].includes(thing.type)) return;
-		// if(thing.flags.multip || [2,3,4,10,12,15,116,127].includes(thing.type)) return;
-
-		const spriteName = thing.meta.sprite;
-
-		if(!spriteName || spriteName[0] === '-')
-		{
-			return;
-		}
-
-		const _sprite = wad.sprite(thing.meta.sprite);
-		const sprite = [];
-
-		for(const f in _sprite)
-		for(const a in _sprite[f])
-		{
-			if(f > 0) break;
-
-			const frame = _sprite[f][a];
-
-			if(!frame) continue;
-
-			const texture = textureLoader.load(await frame.picture.decode(lightLevel));
-			sprite[f] = sprite[f] || [];
-			sprite[f][a] = texture;
-
-			texture.repeat.set(frame.flipped ? -1 : 1, 1);
-			texture.wrapS      = THREE.RepeatWrapping;
-			texture.colorSpace = THREE.SRGBColorSpace;
-			texture.magFilter  = THREE.NearestFilter;
-			if(lowRes) texture.minFilter = THREE.NearestFilter;
-		}
-
-		const picture = (_sprite[0][0] || _sprite[0][1]).picture;
-		const texture = (sprite[0][0] || sprite[0][1]);
-
-		const material = new THREE.MeshBasicMaterial({map: texture, transparent: true});
-		const geometry = new THREE.PlaneGeometry(picture.width, picture.height, 1);
-
-		const plane = new THREE.Mesh(geometry, material);
-		const pos   = flipVertex(map, thing);
-
-		const sector = map.bspPoint(thing.x, thing.y)
-
-		plane.position.x = pos.x;
-		plane.position.z = pos.y;
-		plane.position.y = sector.floorHeight + picture.height / 2;
-		plane.rotation.y = 0;
-
-		plane.userData.thing = thing;
-		plane.userData.sprite = sprite;
-
-		things.add(plane);
-		scene.add(plane);
-	});
+	level = new Level(map, wad, scene);
 
 	let hasSky = true;
 
-	if(hasSky)
-	{
-		const texture = await loadTexture(wad, 'SKY1', lightLevel);
-		texture.magFilter = THREE.NearestFilter;
-		if(lowRes) texture.minFilter = THREE.NearestFilter;
-		texture.wrapS = THREE.RepeatWrapping;
-		texture.wrapT = THREE.ClampToEdgeWrapping;
-		texture.colorSpace = THREE.SRGBColorSpace;
-		scene.background = texture;
-	}
-
-	await Promise.all([...loadRooms, ...loadWalls, ...loadFloors, ...loadThings]);
-
-	console.log( await wad.picture('SHOTA0').decode() )
-	console.log( await wad.hash() )
+	await level.setup();
 
 	console.timeEnd('setup');
+
+	console.log(`Loading ${selectedMap}`);
 }
 
 let then = 0;
@@ -992,8 +2049,144 @@ const camDir = new THREE.Vector3();
 let xSpeed = 0;
 let ySpeed = 0;
 
-function render(now)
-{
+const ldAction = (linedef, room, oRoom, dot) => {
+	// console.log(linedef.actionMeta);
+	if(linedef.actionMeta)
+	switch(linedef.actionMeta.type)
+	{
+		case 'mDoor':
+			// console.assert(oRoom.isDoor, 'Other room is not a door!');
+			oRoom.openDoor(linedef.actionMeta.tm);
+			break;
+
+		case 'rDoor':
+			if(level.tags.has(linedef.tag))
+			for(const sector of level.tags.get(linedef.tag))
+			{
+				const room = level.rooms.get(sector.index);
+				room.openDoor(linedef.actionMeta.tm);
+			}
+			break;
+
+		case 'Ceil':
+			if(level.tags.has(linedef.tag))
+			for(const sector of level.tags.get(linedef.tag))
+			{
+				const lift = level.rooms.get(sector.index);
+				switch(linedef.actionMeta.index)
+				{
+					case 40:
+						lift.raiseCeiling(linedef.actionMeta);
+						break;
+					case 41:
+					case 43:
+					case 44:
+					case 49:
+					case 72:
+						lift.lowerCeiling(linedef.actionMeta);
+						break;
+				}
+			}
+			break;
+
+		case 'Lift':
+			if(level.tags.has(linedef.tag))
+			switch(linedef.actionMeta.index)
+			{
+				case 10:
+				case 21:
+				case 88:
+				case 62:
+				case 121:
+				case 122:
+				case 120:
+				case 123:
+					for(const sector of level.tags.get(linedef.tag))
+					{
+						const lift = level.rooms.get(sector.index);
+						lift.lastAction = linedef.actionMeta;
+						lift.lowerLift(linedef.actionMeta);
+					}
+					break;
+			}
+			break;
+
+		case 'Floor':
+			if(level.tags.has(linedef.tag))
+			switch(linedef.actionMeta.index)
+			{
+				case 119:
+				case 128:
+				case 18:
+				case 69:
+				case 22:
+				case 95:
+				case 20:
+				case 68:
+				case 47:
+					for(const sector of level.tags.get(linedef.tag))
+					{
+						const lift = level.rooms.get(sector.index);
+						lift.lastAction = linedef.actionMeta;
+						lift.raiseFloor(linedef.actionMeta);
+					}
+					break;
+
+				case 5:
+				case 91:
+				case 101:
+				case 64:
+				case 24:
+					for(const sector of level.tags.get(linedef.tag))
+					{
+						const lift = level.rooms.get(sector.index);
+						lift.lastAction = linedef.actionMeta;
+						lift.raiseFloor(linedef.actionMeta);
+					}
+					break;
+
+				case 102:
+				case 83:
+				case 45:
+				case 36:
+				case 71:
+				case 98:
+				case 70:
+				case 36:
+					for(const sector of level.tags.get(linedef.tag))
+					{
+						const lift = level.rooms.get(sector.index);
+						lift.lastAction = linedef.actionMeta;
+						lift.lowerLift(linedef.actionMeta);
+					}
+					break;
+			}
+			break;
+
+		case 'Stair':
+			for(const room of level.tags.get(linedef.tag))
+			{
+				room.lastAction = linedef.actionMeta;
+				room.raiseStaircase(linedef.actionMeta);
+			}
+			break;
+
+		case 'Telpt':
+			if(dot < 0)
+			for(const room of level.tags.get(linedef.tag))
+			{
+				const sector = map.sector(room.index);
+				console.log(sector.bounds);
+				const flipped = flipVertex(map, {x:sector.bounds.xPosition, y: sector.bounds.yPosition});
+				camera.position.x = flipped.x;
+				camera.position.z = flipped.y;
+				break;
+			}
+			break;
+	}
+};
+
+const render = (now) => {
 	requestAnimationFrame(render);
 
 	const delta = Math.min(32, now - then);
@@ -1003,13 +2196,8 @@ function render(now)
 		return;
 	}
 
-	for(const room of rooms.values())
+	for(const room of level.rooms.values())
 	{
-		if(!room.isDoor)
-		{
-			continue;
-		}
-
 		room.simulate(delta);
 	}
 
@@ -1021,6 +2209,22 @@ function render(now)
 	});
 
 	const sector = map.bspPoint(flipped.x, flipped.y);
+	const room = level.rooms.get(sector.index);
+
+	if(map.lumps.GL_PVS && map.lumps.GL_PVS.size)
+	{
+		const ssector = map.bspPoint(flipped.x, flipped.y, true);
+		const visible = map.glpvsVisibleFrom(ssector.index);
+
+		// console.log(visible);
+		for(const room of level.rooms.values())
+		{
+			if(visible.has(room.index)) room.show();
+			else room.hide();
+		}
+	}
+
+	room.show();
 
 	camera.getWorldDirection(camDir);
 
@@ -1030,14 +2234,14 @@ function render(now)
 	const xImpulse = Number(moveRight) - Number(moveLeft);
 	const yImpulse = Number(moveBackward) - Number(moveForward);
 
-	const impulseDir = Math.atan2(yImpulse, xImpulse) + hCam + Math.PI/2;
-	const impulseMag = Math.hypot(yImpulse, xImpulse);
+	const impulseDir = Math.atan2(1.25 * yImpulse, xImpulse) + hCam + Math.PI/2;
+	const impulseMag = Math.hypot(1.25 * yImpulse, xImpulse);
 
 	const xSpeedChange = Math.cos(impulseDir) * impulseMag * 0.03125 * ( (delta/1000)/(1/35) );
 	const ySpeedChange = Math.sin(impulseDir) * impulseMag * 0.03125 * ( (delta/1000)/(1/35) );
 
-	xSpeed += xSpeedChange * 50;
-	ySpeed += ySpeedChange * 50;
+	xSpeed += xSpeedChange * 40;
+	ySpeed += ySpeedChange * 40;
 
 	xSpeed *= 0.90625;
 	ySpeed *= 0.90625;
@@ -1076,38 +2280,14 @@ function render(now)
 			flippedTo.x, flippedTo.y
 		);
 
-		let passable = !(linedef.flags & 0b00000001);
-
 		const rigthSide = map.sidedef(linedef.right);
 		const leftSide = linedef.left > -1 && map.sidedef(linedef.left);
 
-		const unflipped = unflipVertex(map, {x: xCam, y: zCam});
 		const rSector = map.sector(rigthSide.sector);
 		const lSector = leftSide.sector > -1 && map.sector(leftSide.sector);
 
-		const rRoom = rooms.get(rSector.index);
-		const lRoom = lSector && rooms.get(lSector.index);
-
-		if(sector.floorHeight - rRoom.floorHeight < -24
-			|| Math.abs(rRoom.ceilingHeight - rRoom.floorHeight) < 48
-		){
-			passable = false;
-		}
-
-		if(!lRoom || (
-			(sector.floorHeight - lRoom.floorHeight) < -24
-			|| (lRoom.ceilingHeight - lRoom.floorHeight) < 48
-			|| (lRoom.ceilingHeight - lRoom.floorHeight) < 48
-			|| (lRoom.ceilingHeight - rRoom.floorHeight) < 48
-			|| (rRoom.ceilingHeight - lRoom.floorHeight) < 48
-		)){
-			passable = false;
-		}
-
-		if(noClip)
-		{
-			passable = true;
-		}
+		const rRoom = level.rooms.get(rSector.index);
+		const lRoom = lSector && level.rooms.get(lSector.index);
 
 		const fromDir  = Math.atan2(flippedFrom.y - zCam, flippedFrom.x - xCam);
 		const xFromVec = Math.cos(fromDir);
@@ -1117,14 +2297,39 @@ function render(now)
 		const xToVec   = Math.cos(toDir);
 		const yToVec   = Math.sin(toDir);
 
-		const fromDot  = (xCamVec * xFromVec + zCamVec * yFromVec) / 2;
-		const toDot    = (xCamVec * xToVec + zCamVec * yToVec) / 2;
+		const fromDot  = (xCamVec * xFromVec + zCamVec * yFromVec);
+		const toDot    = (xCamVec * xToVec + zCamVec * yToVec);
 
 		const lineMag  = Math.hypot(to.y - from.y, to.x - from.x);
-		const lineVec  = [(to.y - from.y) / lineMag, (to.x - from.x) / lineMag]; // [y,x]
-		const lineNVec = [lineVec[1], lineVec[0]]; // [y,x]
-		const lineNDot = (lineNVec[0] * (ySpeed/speedMag) + lineNVec[1] * (xSpeed/speedMag)) / 2;
+		const lineVec  = [(to.y - from.y) / lineMag, (to.x - from.x) / lineMag]; // [y, x]
+		const lineNVec = [lineVec[1], lineVec[0]]; // [y, x]
+		// const lineNDot = (lineNVec[0] * (ySpeed/speedMag) + lineNVec[1] * (xSpeed/speedMag));
+		const lineNDot = (lineNVec[0] * (ySpeed/speedMag) + lineNVec[1] * (xSpeed/speedMag));
+		const room     = lineNDot < 0 ? rRoom : lRoom;
 		const oRoom    = lineNDot > 0 ? rRoom : lRoom;
+
+		let passable = !(linedef.flags & 0b00000001);
+
+		if((camera.position.y === room.floorHeight && (camera.position.y - oRoom.floorHeight) < 24)
+			|| (camera.position.y > room.floorHeight && (camera.position.y - oRoom.floorHeight) < 4)
+			|| Math.abs(room.ceilingHeight - room.floorHeight) < 48
+		){
+			passable = false;
+		}
+
+		if(!oRoom || (
+			(oRoom.ceilingHeight - oRoom.floorHeight) < 48
+			|| (oRoom.ceilingHeight - oRoom.floorHeight) < 48
+			|| (oRoom.ceilingHeight - room.floorHeight)  < 48
+			|| (room.ceilingHeight  - oRoom.floorHeight) < 48
+		)){
+			passable = false;
+		}
+
+		if(noClip)
+		{
+			passable = true;
+		}
 
 		if(!passable)
 		{
@@ -1143,6 +2348,8 @@ function render(now)
 
 			if(speedLineDot <= 0 && nearestLineMag < 16)
 			{
+				// linedef && console.log(linedef);
+
 				if(nearest.t > (0 - margin) && nearest.t < (1 + margin))
 				{
 					camera.position.x += Math.cos(nearestLineDir + Math.PI) * -(16-nearestLineMag);
@@ -1151,14 +2358,22 @@ function render(now)
 					xSpeed += Math.cos(nearestLineDir + Math.PI) * -Math.min(16 - nearestLineMag, Math.abs(speedMag));
 					ySpeed += Math.sin(nearestLineDir + Math.PI) * -Math.min(16 - nearestLineMag, Math.abs(speedMag));
 
-					if(oRoom && oRoom.isDoor)
+					if(room && lineNDot < 0 && linedef.actionMeta && linedef.actionMeta.modifier.indexOf('S') > -1)
 					{
-						oRoom.openDoor();
+						room.lastAction = linedef.actionMeta;
+						room.flipSwitch(linedef);
+						ldAction(linedef, room, oRoom, lineNDot);
+						if(linedef.actionMeta.type === 'Exit')
+						{
+							console.log(`Next level is ${wad.findNextMap(map.name)}`);
+						}
 					}
 				}
 			}
 			else if(intersection)
 			{
+				linedef && console.log(linedef);
+
 				if(fromDot > 0)
 				{
 					xSpeed = Math.cos(fromDir) * speedMag;
@@ -1171,14 +2386,30 @@ function render(now)
 				}
 			}
 		}
+		else if(intersection)
+		{
+			if(linedef.actionMeta && linedef.actionMeta.modifier.indexOf('W') > -1)
+			{
+				ldAction(linedef, room, oRoom, lineNDot);
+			}
+		}
 	}
 
-	camera.position.x += xSpeed;
-	camera.position.z += ySpeed;
+	if(!noClip)
+	{
+		camera.position.x += xSpeed;
+		camera.position.z += ySpeed;
+	}
+	else
+	{
+		camera.position.x += xSpeed * (1-Math.abs(vCam));
+		camera.position.z += ySpeed * (1-Math.abs(vCam));
+		camera.position.y += speedMag * -vCam * yImpulse * 0.5;
+	}
 
 	if(sector)
 	{
-		yCam = sector.floorHeight + 48;
+		yCam = room.floorHeight + 48;
 	}
 
 	if(Math.abs(camera.position.y - yCam) < 1)
@@ -1186,97 +2417,61 @@ function render(now)
 		camera.position.y = yCam;
 	}
 
-	if(camera.position.y < yCam)
+	if(!noClip)
 	{
-		camera.position.y += 0.25 * (yCam - camera.position.y);
-		yVel = 0;
-	}
-	else if(camera.position.y > yCam)
-	{
-		yVel -= 0.25;
-		camera.position.y += yVel;
-	}
-	else
-	{
-		yVel = 0;
+		if(camera.position.y < yCam)
+		{
+			if(Math.abs(camera.position.y - yCam) > 24)
+			{
+				camera.position.y = yCam - 24 * -Math.sign(camera.position.y - yCam);
+			}
+
+			camera.position.y += 0.25 * (yCam - camera.position.y);
+			yVel = 0;
+		}
+		else if(camera.position.y > yCam)
+		{
+			yVel -= 0.25;
+			camera.position.y += yVel;
+		}
+		else
+		{
+			yVel = 0;
+		}
 	}
 
 	scene.background.repeat.set(-camera.aspect/2, 0.85);
 	scene.background.offset.set((-4*hCam)/(Math.PI*2), vCam + -0.15);
 
-	for(const mesh of animatedFlats)
-	{
-		if(!mesh.userData.frames) continue;
-		const frames = mesh.userData.frames;
-
-		mesh.userData.age += delta;
-		const time = Math.floor(mesh.userData.age / (16 * 12));
-		const current = frames[time % frames.length];
-
-		if(mesh.userData.current !== current)
-		{
-			mesh.userData.current = current;
-			mesh.material.map = current;
-			mesh.material.needsUpdate = true;
-		}
-	}
-
-	for(const mesh of animatedWalls)
-	{
-		if(!mesh.userData.frames) continue;
-		const frames = mesh.userData.frames;
-
-		mesh.userData.age += delta;
-		const time = Math.floor(mesh.userData.age / (16 * 12));
-		const current = frames[time % frames.length];
-
-		if(mesh.userData.current !== current)
-		{
-			mesh.userData.current = current;
-			mesh.material.map = current;
-			mesh.material.needsUpdate = true;
-		}
-	}
-
-	for(const thing of things)
-	{
-		const camAngle = thing.rotation.y = Math.PI + Math.atan2(
-			thing.position.x - camera.position.x,
-			thing.position.z - camera.position.z,
-		);
-
-		const thingAngle = (Math.PI/2) + (-thing.userData.thing.angle * Math.PI) / 180;
-
-		const relAngle = (camAngle + thingAngle) % (Math.PI * 2);
-
-		const roundedAngle = 1 + (4 + Math.round(relAngle / (Math.PI / 4))) % 8;
-		const sprite = thing.userData.sprite;
-		const frame = 0;
-
-		if(sprite[frame][0])
-		{
-			// console.log(roundedAngle, sprite[frame][0]);
-		}
-		else if(sprite[frame][roundedAngle])
-		{
-			thing.material.map = sprite[frame][roundedAngle];
-			thing.material.needsUpdate = true;
-		}
-	}
+	level.simulate(delta);
 
 	renderer.render(scene, camera);
+
+	for(const [sample, {xPosition, yPosition, stereo, gain}] of samplesPlaying)
+	{
+		if(xPosition === undefined || yPosition === undefined) continue;
+		camera.getWorldDirection(camDir);
+		const unflipped = unflipVertex(map, {x: xPosition, y: yPosition});
+		const mag = Math.hypot(unflipped.y - camera.position.z, unflipped.x - camera.position.x);
+		const vec = [unflipped.y - camera.position.z, unflipped.x - camera.position.x] // y, x
+		const dot = ((vec[0]/mag) * camDir.x - (vec[1]/mag) * camDir.z);
+		stereo.pan.value = dot;
+		gain.gain.value = 0.25 / Math.sqrt(mag / 0x80);
+	}
 }
 
-function onWindowResize()
-{
+const onWindowResize = () => {
 	if(!camera) return;
 	camera.aspect = window.innerWidth / window.innerHeight;
 	camera.updateProjectionMatrix();
 	renderer.setSize( window.innerWidth, window.innerHeight );
 }
 
-async function start()
-{
+const onFileDropped = (event) => {
+	console.log(event);
+};
+
+const start = async () => {
 	await setup();
 	onWindowResize();
 	requestAnimationFrame(render);

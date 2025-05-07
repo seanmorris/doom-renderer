@@ -14,7 +14,7 @@ const module = {
 			}]
 		},
 		{
-			test: /\.WAD$/i,
+			test: /\.(WAD|PNG|JSON|ICO)$/i,
 			type: 'asset/resource'
 		},
 	]
@@ -28,6 +28,8 @@ const plugins = [
 	new CopyWebpackPlugin({
 		patterns: [
 			{from: './src/wads', to: 'wads'},
+			{from: './src/favicon.ico', to: 'favicon.ico'},
+			{from: './src/wads.json', to: 'wads.json'},
 		]
 	}),
 ];

@@ -5,4 +5,12 @@ DOOM2.*
 DOOM2.*
 /.aws
 /docs/wads/*
+!/src/wads/freedoom1.wad
+!/src/wads/freedoom2.wad
+!/src/wads/Skulltag-v097d5.wad
+!/src/wads/DOOM1.wad
+!/docs/wads/freedoom1.wad
+!/docs/wads/freedoom2.wad
+!/docs/wads/Skulltag-v097d5.wad
+!/docs/wads/DOOM1.wad
 /src/wads/*

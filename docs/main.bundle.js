@@ -83093,7 +83093,7 @@ const setup = async () => {
 
 	const query = new URLSearchParams(location.search);
 
-	let selectedWad = query.has('wad') ? query.get('wad') : 'DOOM.WAD';
+	let selectedWad = query.has('wad') ? query.get('wad') : 'DOOM1.WAD';
 
 	if(query.get('random-level'))
 	{

@@ -3,3 +3,6 @@ DOOM.*
 CHEX.*
 DOOM2.*
 DOOM2.*
+/.aws
+/docs/wads/*
+/src/wads/*

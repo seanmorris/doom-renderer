@@ -3,14 +3,14 @@
 import * as THREE from 'three';
 import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
-import Zdbsp from 'zdbsp-wasm/Zdbsp.mjs';
+
 import GlbspBinary from 'glbsp-wasm/GlbspBinary.mjs';
-import GlvisBinary from 'glvis-wasm/GlvisBinary.mjs';
 import { Wad, WadLoader } from 'doom-parser/Wad.mjs'
 import MissingTexture from './MissingTexture3D.png';
 import favicon from './favicon.ico';
 
-let camera, scene, renderer, controls;
+let camera, renderer, controls;
+let mainScene, uiScene;
 let moveForward = false;
 let moveBackward = false;
 let moveLeft = false;
@@ -19,9 +19,10 @@ let wad, map;
 let yCam = 0;
 let yVel = 0;
 
+let showThings = true;
 let noClip = false;
-
-let lowRes = 0;
+let lowRes = false;
+let fullbright = false;
 
 const things = new Set;
 
@@ -30,22 +31,27 @@ const textureLoader = new THREE.TextureLoader();
 const flipVertex = (map, vertex) => ({x: vertex.x, y: map.bounds.yMax - (vertex.y - map.bounds.yMin)});
 const unflipVertex = (map, vertex) => ({x: vertex.x, y: map.bounds.yMin - (vertex.y - map.bounds.yMax)});
 
-const byteToLightOffset = byte => (33 - Math.trunc(byte / 8));
+const byteToLightOffset = byte => (33 - Math.ceil(byte / 8));
 
 const missing = textureLoader.load(MissingTexture);
 
 const loadTexture = async (wad, name, lightLevel) => {
 	const wadTexture = wad.texture(name.toUpperCase()) || wad.flat(name.toUpperCase());
 
+	if(!wadTexture)
+	{
+		console.log(name);
+	}
+
 	const texture = wadTexture
 		? textureLoader.load(await wadTexture.decode(lightLevel))
 		: missing.clone();
 
 	texture.userData.wadTexture = wadTexture;
-	texture.userData.missing = !!wadTexture;
+	texture.userData.missing = !wadTexture;
 
 	texture.magFilter = THREE.NearestFilter;
-	if(lowRes) texture.minFilter = THREE.NearestFilter;
+	// if(lowRes) texture.minFilter = THREE.NearestFilter;
 	texture.wrapS = THREE.RepeatWrapping;
 	texture.wrapT = THREE.RepeatWrapping;
 	texture.colorSpace = THREE.SRGBColorSpace;
@@ -64,6 +70,28 @@ const textures = new Map;
 const thingMaterials = new Map;
 const thingGeometries = new Map;
 
+class MessageString
+{
+	constructor(text)
+	{
+		this.container = document.createElement('span');
+		this.text = text;
+		this.container.innerText = this.text;
+	}
+
+	setText(text)
+	{
+		this.text = text;
+		this.container.innerText = this.text;
+
+	}
+
+	remove()
+	{
+		this.container.remove();
+	}
+}
+
 class Level extends EventTarget
 {
 	constructor(map, wad, scene)
@@ -73,11 +101,11 @@ class Level extends EventTarget
 		this.map = map;
 		this.wad = wad;
 		this.scene = scene;
-		this.roomThings = new Map;
 		this.animatedWalls = new Set;
 		this.animatedFlats = new Set;
 		this.tags = new Map;
 		this.transparentPlanes = 0;
+		this.roomThings = new Map;
 		this.planes = 0;
 	}
 
@@ -115,19 +143,24 @@ class Level extends EventTarget
 			}
 
 			const spriteName = thing.meta.sprite;
+			const sector = map.bspPoint(thing.x, thing.y);
+			const room = this.rooms.get(sector.index);
+
+			if(thing.type === 14)
+			{
+				room.destination = thing;
+				return;
+			}
 
 			if(!spriteName || spriteName[0] === '-')
 			{
 				return;
 			}
 
-			const sector = map.bspPoint(thing.x, thing.y);
-			const room = this.rooms.get(sector.index);
-
 			const _sprite = wad.sprite(thing.meta.sprite);
 			const sprite = [];
 
-			if(_sprite)
+			if(_sprite && _sprite[0])
 			{
 				for(const f in _sprite)
 				for(const a in _sprite[f])
@@ -151,7 +184,9 @@ class Level extends EventTarget
 
 					if(!textures.get(spriteKey).has(sector.lightLevel))
 					{
-						const texture = textureLoader.load(await frame.picture.decode( byteToLightOffset(sector.lightLevel) ));
+						const texture = textureLoader.load(await frame.picture.decode(
+							byteToLightOffset(sector.lightLevel)
+						));
 
 						textures.get(spriteKey).set(sector.lightLevel, texture);
 					}
@@ -165,7 +200,7 @@ class Level extends EventTarget
 					texture.wrapS      = THREE.RepeatWrapping;
 					texture.colorSpace = THREE.SRGBColorSpace;
 					texture.magFilter  = THREE.NearestFilter;
-					if(lowRes) texture.minFilter = THREE.NearestFilter;
+					// if(lowRes) texture.minFilter = THREE.NearestFilter;
 				}
 
 				const picture = (_sprite[0][0] || _sprite[0][1]).picture;
@@ -215,9 +250,9 @@ class Level extends EventTarget
 				plane.userData.sprite = sprite;
 				plane.userData.height = picture.height;
 
+				this.scene.add(plane);
 				room.addThing(plane);
 				things.add(plane);
-				scene.add(plane);
 			}
 		});
 
@@ -240,7 +275,7 @@ class Level extends EventTarget
 		const lightLevel = 0;
 
 		const texture = await loadTexture(wad, 'SKY1', lightLevel);
-		if(lowRes) texture.minFilter = THREE.NearestFilter;
+		// if(lowRes) texture.minFilter = THREE.NearestFilter;
 		texture.magFilter = THREE.NearestFilter;
 		texture.wrapS = THREE.RepeatWrapping;
 		texture.wrapT = THREE.ClampToEdgeWrapping;
@@ -356,6 +391,86 @@ class Level extends EventTarget
 			}
 		}
 	}
+
+	setDetail(lowRes)
+	{
+		for(const room of this.rooms.values())
+		{
+			room.setDetail(lowRes);
+		}
+
+		if(lowRes)
+		{
+			renderer.setPixelRatio( window.devicePixelRatio * (320 / window.innerWidth));
+		}
+		else
+		{
+			renderer.setPixelRatio(window.devicePixelRatio);
+		}
+
+		for(const mesh of this.animatedWalls)
+		{
+			if(!mesh.userData.frames) continue;
+			for(const frame of mesh.userData.frames)
+			{
+				if(!frame) continue;
+
+				if(lowRes)
+				{
+					frame.minFilter = THREE.NearestFilter;
+				}
+				else
+				{
+					frame.minFilter = THREE.NearestMipmapLinearFilter;
+				}
+
+				frame.needsUpdate = true;
+			}
+		}
+
+		for(const mesh of this.animatedFlats)
+		{
+			if(!mesh.userData.frames) continue;
+			for(const frame of mesh.userData.frames)
+			{
+				if(!frame) continue;
+
+				if(lowRes)
+				{
+					frame.minFilter = THREE.NearestMipmapNearestFilter;
+				}
+				else
+				{
+					frame.minFilter = THREE.NearestMipmapLinearFilter;
+				}
+
+				frame.needsUpdate = true;
+			}
+		}
+	}
+
+	toggleThings()
+	{
+		showThings = !showThings;
+
+		for(const plane of this.roomThings.keys())
+		{
+			plane.userData.hidden = !showThings;
+			plane.matrixWorldAutoUpdate = showThings;
+			plane.matrixAutoUpdate = showThings;
+			plane.visible = showThings;
+		}
+	}
+
+	toggleFullbright()
+	{
+		fullbright = !fullbright;
+
+		for(const room of this.rooms.values())
+		{
+			room.changeLightLevel(fullbright ? 255 : null);
+		}
+	}
 }
 
 class Room extends EventTarget
@@ -401,6 +516,14 @@ class Room extends EventTarget
 		this.walls = new Map;
 		this.neighbors = new Set;
 		this.things = new Set;
+		this.destination = null;
+
+		this.slopedSectorA  = null;
+		this.slopedSectorB  = null;
+		this.slopedLinedef = null;
+		this.slopedAntidef = null;
+		this.slopeVec = null;
+		this.slopeDist = 0;
 
 		this.isDoor = false;
 		this.visible = true;
@@ -423,11 +546,13 @@ class Room extends EventTarget
 
 	hide()
 	{
-		// if(!this.visible) return;
+		if(!this.visible) return;
 
-		// for(const plane of [...this.innerPlanes, ...this.ceilingPlanes, ...this.floorPlanes, ...this.things])
 		for(const plane of [...this.middlePlanes, ...this.lowerPlanes, ...this.upperPlanes, ...this.ceilingPlanes, ...this.floorPlanes, ...this.things])
 		{
+			plane.needsUpdate = true;
+			plane.matrixWorldAutoUpdate = false;
+			plane.matrixAutoUpdate = false;
 			plane.visible = false;
 		}
 
@@ -436,15 +561,89 @@ class Room extends EventTarget
 
 	show()
 	{
-		// if(this.visible) return;
+		if(this.visible) return;
 
-		// for(const plane of [...this.innerPlanes, ...this.ceilingPlanes, ...this.floorPlanes, ...this.things])
 		for(const plane of [...this.middlePlanes, ...this.lowerPlanes, ...this.upperPlanes, ...this.ceilingPlanes, ...this.floorPlanes, ...this.things])
 		{
+			plane.needsUpdate = true;
+
+			if(plane.userData.hidden)
+			{
+				// continue;
+			}
+
+			plane.matrixWorldAutoUpdate = true;
+			plane.matrixAutoUpdate = true;
 			plane.visible = true;
 		}
 
 		this.visible = true;
+
+		this.setDetail(lowRes);
+	}
+
+	setDetail(lowRes)
+	{
+		if(!this.visible) return;
+
+		for(const plane of [...this.middlePlanes, ...this.lowerPlanes, ...this.upperPlanes])
+		{
+			if(lowRes)
+			{
+				plane.material.map.minFilter = THREE.NearestFilter;
+			}
+			else
+			{
+				plane.material.map.minFilter = THREE.NearestMipmapLinearFilter;
+			}
+
+			plane.material.map.needsUpdate = true;
+		}
+
+		for(const plane of [...this.ceilingPlanes, ...this.floorPlanes])
+		{
+			if(lowRes)
+			{
+				plane.material.map.minFilter = THREE.NearestMipmapNearestFilter;
+			}
+			else
+			{
+				plane.material.map.minFilter = THREE.NearestMipmapLinearFilter;
+			}
+
+			plane.material.map.needsUpdate = true;
+		}
+
+		for(const plane of [...this.things])
+		{
+			if(lowRes)
+			{
+				plane.material.map.minFilter = THREE.NearestFilter;
+			}
+			else
+			{
+				plane.material.map.minFilter = THREE.NearestMipmapLinearFilter;
+			}
+
+			plane.material.map.needsUpdate = true;
+
+			for(const animation of plane.userData.sprite)
+			for(const frame of animation)
+			{
+				if(!frame) continue;
+
+				if(lowRes)
+				{
+					frame.minFilter = THREE.NearestFilter;
+				}
+				else
+				{
+					frame.minFilter = THREE.NearestMipmapLinearFilter;
+				}
+
+				frame.needsUpdate = true;
+			}
+		}
 	}
 
 	simulate(delta)
@@ -460,6 +659,61 @@ class Room extends EventTarget
 		}
 
 		const groundedThings = new Set;
+
+		if(this.slopedLinedef && !this.slopedAntidef)
+		{
+			const from = this.level.map.vertex(this.slopedLinedef.from);
+			const to   = this.level.map.vertex(this.slopedLinedef.to);
+			const xCenter = (from.x + to.x) / 2;
+			const yCenter = (from.y + to.y) / 2;
+			const mag  = Math.hypot(from.y - to.y, from.x - to.x);
+			const nVec  = [(from.y - to.y) / mag, (from.x - to.x) / mag];
+			const dots = new Map;
+
+			for(const linedef of this.linedefs)
+			{
+				if(linedef === this.slopedLinedef) continue;
+
+				const aFrom = this.level.map.vertex(linedef.from);
+				const aTo   = this.level.map.vertex(linedef.to);
+
+				const xACenter = (aFrom.x + aTo.x) / 2;
+				const yACenter = (aFrom.y + aTo.y) / 2;
+
+				const dist = Math.hypot(yCenter - yACenter, xCenter - xACenter);
+				const aVec = [(xCenter - xACenter) / dist, (yACenter - yCenter) / dist];
+
+				const dot = nVec[0] * aVec[0] + nVec[1] * aVec[1];
+
+				dots.set(linedef, {dot, dist});
+			}
+
+			let slopeTo = null;
+
+			const sorted = [...dots.entries()].sort((a, b) => {
+				if(a[1].dot !== b[1].dot)
+				{
+					return b[1].dot - a[1].dot;
+				}
+			});
+
+			slopeTo = sorted[0][0];
+
+			this.slopeDist = sorted[0][1].dist;
+
+			console.log(this.slopedLinedef, slopeTo, sorted);
+
+			this.slopedAntidef = slopeTo;
+			const left = this.level.map.sidedef(this.slopedLinedef.left);
+			this.slopedSectorA = this.level.rooms.get(left.sector);
+
+			const tRight = this.level.map.sidedef(slopeTo.right);
+			this.slopedSectorB = this.level.rooms.get(tRight.sector);
+
+			this.slopeVec = new THREE.Vector3(-nVec[1], 0, nVec[0]);
+
+			this.slope();
+		}
 
 		if(this.ceilingHeight !== this.targetCeilingHeight)
 		{
@@ -580,9 +834,42 @@ class Room extends EventTarget
 		}
 	}
 
-	changeLightLevel(level)
+	async changeLightLevel(lightLevel = null)
 	{
+		if(lightLevel === null)
+		{
+			lightLevel = this.sector.lightLevel;
+		}
 
+		for(const plane of [...this.innerPlanes])
+		{
+			if(!plane.material.map.userData.wadTexture) continue;
+
+			const wadTexture = plane.material.map.userData.wadTexture;
+			const texture = await loadTexture(
+				this.level.wad, wadTexture.name, byteToLightOffset(lightLevel),
+			);
+
+			texture.userData.wadTexture = wadTexture;
+			plane.material.map = texture;
+			plane.material.needsUpdate = true;
+
+			this.alignTexture(plane, texture)
+		}
+
+		for(const plane of [...this.floorPlanes, ...this.ceilingPlanes])
+		{
+			const wadTexture = plane.userData.wadTexture;
+			const texture = await loadTexture(
+				this.level.wad, wadTexture.name, byteToLightOffset(lightLevel),
+			);
+
+			texture.repeat.set(plane.userData.size[0] / 64, plane.userData.size[1] / 64);
+
+			texture.userData.wadTexture = wadTexture;
+			plane.material.map = texture;
+			plane.material.needsUpdate = true;
+		}
 	}
 
 	openDoor(closeTime)
@@ -809,6 +1096,64 @@ class Room extends EventTarget
 		}
 	}
 
+	slope()
+	{
+		if(!this.slopedSectorA || !this.slopedSectorB)
+		{
+			return;
+		}
+
+		console.log(this.floorHeight, this.slopedSectorA.floorHeight, this.slopedSectorB.floorHeight);
+
+		const ceilingDiff = this.slopedSectorA.ceilingHeight - this.slopedSectorB.ceilingHeight;
+		const floorDiff   = this.slopedSectorA.floorHeight   - this.slopedSectorB.floorHeight;
+
+		this.ceilingHeight = this.targetCeilingHeight = 0.5 * (this.slopedSectorA.ceilingHeight + this.slopedSectorB.ceilingHeight);
+		this.floorHeight   = this.targetFloorHeight   = 0.5 * (this.slopedSectorA.floorHeight   + this.slopedSectorB.floorHeight);
+
+		console.log(this.floorHeight, this.slopedSectorA.floorHeight, this.slopedSectorB.floorHeight);
+
+		this.moveGeometry();
+
+		for(const plane of this.floorPlanes)
+		{
+			const pos = plane.geometry.attributes.position;
+			const box = new THREE.Box3().setFromBufferAttribute(pos);
+			const center = new THREE.Vector3;
+			box.getCenter(center);
+
+			const nCenter = center.clone().normalize();
+			const tr = center.length();
+			const angle = Math.atan2(floorDiff, this.slopeDist);
+
+			console.log(floorDiff, this.slopeDist);
+
+			plane
+			.translateOnAxis(nCenter, tr)
+			.rotateOnWorldAxis(this.slopeVec, angle)
+			.translateOnAxis(nCenter, -tr);
+		}
+
+		for(const plane of this.ceilingPlanes)
+		{
+			const pos = plane.geometry.attributes.position;
+			const box = new THREE.Box3().setFromBufferAttribute(pos);
+			const center = new THREE.Vector3;
+			box.getCenter(center);
+
+			const nCenter = center.clone().normalize();
+			const tr = center.length();
+			const angle = Math.atan2(ceilingDiff, this.slopeDist);
+
+			console.log(ceilingDiff, this.slopeDist);
+
+			plane
+			.translateOnAxis(nCenter, tr)
+			.rotateOnWorldAxis(this.slopeVec, angle)
+			.translateOnAxis(nCenter, -tr);
+		}
+	}
+
 	async addWall(linedef, isLeftWall)
 	{
 		this.linedefs.add(linedef);
@@ -825,6 +1170,7 @@ class Room extends EventTarget
 
 		if([2,90,103].includes(linedef.action))
 		{
+			if(this.level.tags.has(linedef.tag))
 			for(const other of this.level.tags.get(linedef.tag))
 			{
 				other.isDoor = true;
@@ -844,7 +1190,20 @@ class Room extends EventTarget
 
 		oRoom && this.neighbors.add(oRoom);
 
-		const light   = (33 - Math.trunc(sector.lightLevel / 8));
+		if(this.level.map.format === 'HEXEN')
+		{
+			if([181].includes(linedef.action))
+			{
+				console.log(linedef);
+
+				if(!isLeftWall)
+				{
+					this.slopedLinedef = linedef;
+				}
+			}
+		}
+
+		const light   = byteToLightOffset(sector.lightLevel);
 		const height  = sector.ceilingHeight - sector.floorHeight;
 
 		const upperUnpegged = linedef.flags & (1<<3);
@@ -950,7 +1309,6 @@ class Room extends EventTarget
 			plane.userData.rSector = rSector;
 			plane.userData.lSector = lSector;
 
-
 			this.middlePlanes.add(plane);
 			if(oRoom) oRoom.middlePlanes.add(plane);
 			if(!isLeftWall) this.innerPlanes.add(plane);
@@ -1039,7 +1397,7 @@ class Room extends EventTarget
 			this.lowerPlanes.add(plane);
 			if(oRoom) oRoom.lowerPlanes.add(plane);
 			if(!isLeftWall) this.innerPlanes.add(plane);
-			scene.add(plane);
+			this.scene.add(plane);
 		}
 
 		const rSky = rSector.ceilingFlat === 'F_SKY1';
@@ -1122,7 +1480,7 @@ class Room extends EventTarget
 			this.upperPlanes.add(plane);
 			if(oRoom) oRoom.upperPlanes.add(plane);
 			if(!isLeftWall) this.innerPlanes.add(plane);
-			scene.add(plane);
+			this.scene.add(plane);
 		}
 	}
 
@@ -1136,8 +1494,6 @@ class Room extends EventTarget
 	async changeWallTexture(plane, textureName, lightLevel)
 	{
 		const wadTexture = wad.texture(textureName);
-		const url  = await wadTexture.decode(lightLevel);
-		// const texture = textureLoader.load(url);
 
 		if(!textures.has(textureName))
 		{
@@ -1146,6 +1502,7 @@ class Room extends EventTarget
 
 		if(!textures.get(textureName).has(this.lightLevel))
 		{
+			const url = await wadTexture.decode(lightLevel);
 			const texture = textureLoader.load(url);
 
 			textures.get(textureName).set(this.lightLevel, texture);
@@ -1178,8 +1535,6 @@ class Room extends EventTarget
 		for(const frameName of frameNames)
 		{
 			const wadTexture = wad.texture(frameName);
-			const url  = await wadTexture.decode(lightLevel);
-			// const texture = textureLoader.load(url);
 
 			if(!textures.has(frameName))
 			{
@@ -1188,6 +1543,7 @@ class Room extends EventTarget
 
 			if(!textures.get(frameName).has(this.lightLevel))
 			{
+				const url = await wadTexture.decode(lightLevel);
 				const texture = textureLoader.load(url);
 
 				textures.get(frameName).set(this.lightLevel, texture);
@@ -1212,7 +1568,7 @@ class Room extends EventTarget
 	{
 		const sector = this.sector;
 
-		const lightLevel = 33 - Math.trunc(sector.lightLevel / 8);
+		const lightLevel = byteToLightOffset(sector.lightLevel);
 
 		const ceilingGeos = [];
 		const floorGeos = [];
@@ -1246,15 +1602,13 @@ class Room extends EventTarget
 		const floorGeometry = BufferGeometryUtils.mergeGeometries(floorGeos);
 		const ceilingGeometry = BufferGeometryUtils.mergeGeometries(ceilingGeos);
 
-		const loader = wad.loader || wad;
-
 		const pos = floorGeometry.attributes.position;
 		const box = new THREE.Box3().setFromBufferAttribute(pos);
 		const size = new THREE.Vector3();
 		box.getSize(size);
 
-		const floorFlat   = loader.flat(sector.floorFlat)   || loader.texture(sector.floorFlat);
-		const ceilingFlat = loader.flat(sector.ceilingFlat) || loader.texture(sector.ceilingFlat);
+		const floorFlat   = wad.flat(sector.floorFlat)   || wad.texture(sector.floorFlat);
+		const ceilingFlat = wad.flat(sector.ceilingFlat) || wad.texture(sector.ceilingFlat);
 
 		if(!textures.has(sector.floorFlat))
 		{
@@ -1266,21 +1620,29 @@ class Room extends EventTarget
 			textures.set(sector.ceilingFlat, new Map);
 		}
 
+		if(sector.floorFlat === 'GRASS1_2')
+		{
+			console.log(floorFlat, sector);
+		}
+
 		if(!textures.get(sector.floorFlat).has(lightLevel))
 		{
 			const floorTexture = floorFlat ? textureLoader.load(await floorFlat.decode(lightLevel)) : missing.clone();
-			if(lowRes) floorTexture.minFilter = THREE.NearestFilter;
+			// if(lowRes) floorTexture.minFilter = THREE.NearestFilter;
 			floorTexture.magFilter = THREE.NearestFilter;
 			floorTexture.colorSpace = THREE.SRGBColorSpace;
 			floorTexture.wrapS = THREE.RepeatWrapping;
 			floorTexture.wrapT = THREE.RepeatWrapping;
 			textures.get(sector.floorFlat).set(lightLevel, floorTexture);
+
+			if(!floorFlat) console.log(sector.floorFlat);
+			if(!ceilingFlat) console.log(sector.ceilingFlat);
 		}
 
 		if(!textures.get(sector.ceilingFlat).has(lightLevel))
 		{
 			const ceilingTexture = ceilingFlat ? textureLoader.load(await ceilingFlat.decode(lightLevel))  : missing.clone();
-			if(lowRes) ceilingTexture.minFilter = THREE.NearestFilter;
+			// if(lowRes) ceilingTexture.minFilter = THREE.NearestFilter;
 			ceilingTexture.magFilter = THREE.NearestFilter;
 			ceilingTexture.colorSpace = THREE.SRGBColorSpace;
 			ceilingTexture.wrapS = THREE.RepeatWrapping;
@@ -1299,6 +1661,11 @@ class Room extends EventTarget
 
 		const floor   = new THREE.Mesh(floorGeometry, floorMaterial);
 		const ceiling = new THREE.Mesh(ceilingGeometry, ceilingMaterial);
+
+		ceiling.userData.wadTexture = ceilingFlat;
+		ceiling.userData.size       = [size.x, size.z];
+		floor.userData.wadTexture   = floorFlat;
+		floor.userData.size         = [size.x, size.z];
 
 		if(floorFlat && floorFlat.animation)
 		{
@@ -1380,8 +1747,8 @@ class Room extends EventTarget
 
 		let xfOffset = 0;
 		let xcOffset = 0;
-		let yfOffset = map.bounds.height % 64;
-		let ycOffset = map.bounds.height % 64;
+		let yfOffset = map.bounds.yPosition % 64;
+		let ycOffset = map.bounds.yPosition % 64;
 
 		this.setUV(floorGeometry, xfOffset, yfOffset);
 		this.setUV(ceilingGeometry, xcOffset, ycOffset);
@@ -1424,10 +1791,11 @@ class Room extends EventTarget
 		if(this.level.roomThings.has(thing))
 		{
 			const room = this.level.roomThings.get(thing);
-
+			this.level.roomThings.delete(thing);
 			room.things.delete(thing);
 		}
 
+		this.level.roomThings.set(thing, this);
 		this.things.add(thing);
 	}
 
@@ -1453,7 +1821,7 @@ class Room extends EventTarget
 			this.changeWallTexture(
 				wall.middle,
 				on + wall.middle.userData.textureName.substr(3),
-				(33 - Math.trunc(this.lightLevel / 8)),
+				byteToLightOffset(this.lightLevel),
 			);
 
 			const from = map.vertex(linedef.from);
@@ -1468,7 +1836,7 @@ class Room extends EventTarget
 				this.changeWallTexture(
 					wall.middle,
 					off + wall.middle.userData.textureName.substr(3),
-					(33 - Math.trunc(this.lightLevel / 8)),
+					byteToLightOffset(this.lightLevel),
 				);
 
 				playSample(wad.sample('DSSWTCHX'), xCenter, yCenter);
@@ -1484,7 +1852,7 @@ class Room extends EventTarget
 			this.changeWallTexture(
 				wall.lower,
 				on + wall.lower.userData.textureName.substr(3),
-				(33 - Math.trunc(this.lightLevel / 8)),
+				byteToLightOffset(this.lightLevel),
 			);
 
 			playSample(wad.sample('DSSWTCHN')).then(async () => {
@@ -1492,7 +1860,7 @@ class Room extends EventTarget
 				this.changeWallTexture(
 					wall.lower,
 					off + wall.lower.userData.textureName.substr(3),
-					(33 - Math.trunc(this.lightLevel / 8)),
+					byteToLightOffset(this.lightLevel),
 				);
 				playSample(wad.sample('DSSWTCHX'));
 				this.switchesFlipped.delete(linedef.index);
@@ -1507,7 +1875,7 @@ class Room extends EventTarget
 			this.changeWallTexture(
 				wall.upper,
 				on + wall.upper.userData.textureName.substr(3),
-				(33 - Math.trunc(this.lightLevel / 8)),
+				byteToLightOffset(this.lightLevel),
 			);
 
 			playSample(wad.sample('DSSWTCHN')).then(async () => {
@@ -1516,7 +1884,7 @@ class Room extends EventTarget
 				this.changeWallTexture(
 					wall.upper,
 					off + wall.upper.userData.textureName.substr(3),
-					(33 - Math.trunc(this.lightLevel / 8)),
+					byteToLightOffset(this.lightLevel),
 				);
 
 				playSample(wad.sample('DSSWTCHX'));
@@ -1640,58 +2008,6 @@ const playSample = (sample, xPosition, yPosition) => {
 	return waiter;
 };
 
-const runZdbsp = async (wadBuffer, mapName) => {
-	const zdbsp = await Zdbsp({
-		print: line => console.log(line),
-		printErr: line => {console.warn(line)},
-	});
-
-	zdbsp.FS.writeFile('/tmp/source.wad', new Uint8Array(wadBuffer));
-	const args = ['zdbsp', '-rg', '/tmp/source.wad', '-o', '/tmp/out.wad'];
-
-	const ptrs = args.map(part => {
-		const len = zdbsp.lengthBytesUTF8(part) + 1;
-		const loc = zdbsp._malloc(len);
-		zdbsp.stringToUTF8(part, loc, len);
-		return loc;
-	});
-
-	const arLoc = zdbsp._malloc(4 * ptrs.length);
-	try
-	{
-		for(const i in ptrs)
-		{
-			zdbsp.setValue(arLoc + 4 * i, ptrs[i], '*');
-		}
-
-		const process = zdbsp.ccall(
-			'main'
-			, 'number'
-			, ['number', 'number']
-			, [ptrs.length, arLoc]
-			, {async: true}
-		);
-
-		return zdbsp.FS.readFile('/tmp/out.wad');
-	}
-	catch(error)
-	{
-		if(typeof error === 'object' && (!('status' in error) || error.status !== 0))
-		{
-			throw error;
-		}
-		else
-		{
-			console.warn(error);
-		}
-	}
-	finally
-	{
-		ptrs.forEach(p => zdbsp._free(p));
-		zdbsp._free(arLoc);
-	}
-};
-
 const runGlbsp = async (wadBuffer) => {
 	const glbsp = await GlbspBinary({
 		print: line => console.log(line),
@@ -1744,62 +2060,15 @@ const runGlbsp = async (wadBuffer) => {
 	}
 };
 
-const runGlvis = async (wadBuffer) => {
-	const glvis = await GlvisBinary({
-		print: line => console.log(line),
-		printErr: line => {console.warn(line)},
-	});
-
-	glvis.FS.writeFile('/tmp/vis-source.wad', new Uint8Array(wadBuffer));
-	const args = ['glvis', '-v', '-noreject', '/tmp/vis-source.wad'];
-
-	const ptrs = args.map(part => {
-		const len = glvis.lengthBytesUTF8(part) + 1;
-		const loc = glvis._malloc(len);
-		glvis.stringToUTF8(part, loc, len);
-		return loc;
-	});
-
-	const arLoc = glvis._malloc(4 * ptrs.length);
-	try
-	{
-		for(const i in ptrs)
-		{
-			glvis.setValue(arLoc + 4 * i, ptrs[i], '*');
-		}
-
-		const process = glvis.ccall(
-			'main'
-			, 'number'
-			, ['number', 'number']
-			, [ptrs.length, arLoc]
-			, {async: true}
-		);
-
-		return glvis.FS.readFile('/tmp/vis-source.wad');
-	}
-	catch(error)
-	{
-		if(typeof error === 'object' && (!('status' in error) || error.status !== 0))
-		{
-			throw error;
-		}
-		else
-		{
-			console.warn(error);
-		}
-	}
-	finally
-	{
-		ptrs.forEach(p => glvis._free(p));
-		glvis._free(arLoc);
-	}
-};
-
 let level;
+
+const myWorker = new Worker(new URL("./worker.js", import.meta.url));
 
 const setup = async () => {
 	console.time('setup');
+
+	const ms = new MessageString('Loading...');
+	document.querySelector('#loader').append(ms.container);
 
 	let prefix = '';
 
@@ -1810,7 +2079,7 @@ const setup = async () => {
 
 	const query = new URLSearchParams(location.search);
 
-	let selectedWad = query.has('wad') ? query.get('wad') : null;
+	let selectedWad = query.has('wad') ? query.get('wad') : 'DOOM.WAD';
 
 	if(query.get('random-level'))
 	{
@@ -1821,18 +2090,24 @@ const setup = async () => {
 	}
 
 	let wadUrl = new URL(selectedWad, location.origin);
+	let wadIsExternal = false;
 
 	if(wadUrl.origin === location.origin)
 	{
-		wadUrl = prefix + '/wads/' + wadUrl.pathname.substr(1);
+		wadUrl = 'https://level-archive.seanmorr.is/' + wadUrl.pathname.substr(1);
+	}
+	else
+	{
+		wadIsExternal = true;
 	}
 
 	const iWadList = [
 		await (await fetch(prefix + '/wads/freedoom1.wad')).arrayBuffer(),
 		await (await fetch(prefix + '/wads/freedoom2.wad')).arrayBuffer(),
 		await (await fetch(prefix + '/wads/DOOM1.WAD')).arrayBuffer(),
-		// await (await fetch(prefix + '/wads/Skulltag-v097d5.wad')).arrayBuffer(),
 		// await (await fetch(prefix + '/wads/DOOM2.WAD')).arrayBuffer(),
+		// await (await fetch(prefix + '/wads/Skulltag-v097d5.wad')).arrayBuffer(),
+		// await (await fetch(prefix + '/wads/CHEX.wad')).arrayBuffer(),
 	];
 
 	const pWadList = [];
@@ -1859,6 +2134,9 @@ const setup = async () => {
 
 	wad = new WadLoader(...wadList);
 
+	document.body.style.setProperty('--backdrop', `url("${await wad.texture('BIGDOOR4').decode()}")`);
+
+
 	const mapsNames = wad.findMaps();
 
 	if(!mapsNames.length)
@@ -1871,22 +2149,48 @@ const setup = async () => {
 
 	if(!mapsNames.includes(selectedMap))
 	{
-		throw new Error(`Map ${selectedMap} not found.`);
+		throw new Error(`Map ${wadUrl.substr(6)} not found.`);
 	}
 
 	map = wad.loadMap(selectedMap);
 
-	const mapData = map.splitMap(selectedMap);
+	const originalMapData = map.splitMap(selectedMap);
+	let mapData = originalMapData;
 	const single = new Wad(mapData);
 
 	if(!single.getLumpByName('GL_NODES'))
 	{
-		const processedBsp = await runGlbsp( mapData );
-		const processedVis = await runGlvis(processedBsp);
+		ms.setText(`${wadUrl.substr(6)}#${selectedMap}\nBuilding BSP Nodes`);
 
-		wad.addPWad(processedVis);
+		mapData = await runGlbsp(mapData);
 		map = wad.loadMap(selectedMap);
 	}
+
+	if(!map.lumps.GL_PVS || !map.lumps.GL_PVS.size)
+	{
+		let accept;
+		const waiter = new Promise(a => accept = a);
+
+		myWorker.addEventListener('message', event => {
+			if(event.data.done)
+			{
+				accept(event.data.mapData);
+			}
+			else
+			{
+				ms.setText(`${wadUrl.substr(6)}#${selectedMap}\nPortal Sight-Checks Remaining: ${event.data.status}`);
+			}
+		});
+
+		myWorker.postMessage(mapData);
+
+		mapData = await waiter;
+
+		map = wad.loadMap(selectedMap);
+	}
+
+	wad.addPWad(mapData);
+	map = wad.loadMap(selectedMap);
 
 	const bounds = map.bounds;
 
@@ -1943,43 +2247,24 @@ const setup = async () => {
 		camera.position.set(0, 0, -1000);
 	}
 
-	const res = lowRes ? 1 / 8 : 1;
+	const res = lowRes ? (320 / window.innerWidth) : 1;
 
-	const canvas = document.querySelector('#c');
+	const canvas = document.querySelector('canvas');
 	renderer = new THREE.WebGLRenderer( { canvas, powerPreference: 'high-performance' } );
 	renderer.setClearColor(0xFFFFFF);
 	renderer.setPixelRatio( window.devicePixelRatio * res);
 	renderer.setSize(window.innerWidth * res, window.innerHeight * res);
 	render.autoClear = false;
 
-	document.body.appendChild( renderer.domElement );
+	// document.body.appendChild( renderer.domElement );
 
 	window.addEventListener('resize', onWindowResize, false);
 	document.addEventListener('drop', onFileDropped, false);
 
 	controls = new PointerLockControls(camera, renderer.domElement);
 
-	document.addEventListener('click', async () => {
-		controls.lock();
-
-		for(const lumpName of wad.lumpNames)
-		{
-			if(lumpName.substr(0, 2) === 'DS')
-			{
-				// console.log(lumpName);
-				// await playSample(wad.sample(lumpName));
-			}
-		}
-
-	});
-
 	controls.update();
-
 	camera.controls = controls;
-
-	scene = new THREE.Scene();
-
-	scene.add( controls.object );
 
 	const onKeyDown = event => {
 		switch ( event.code )
@@ -2025,21 +2310,64 @@ const setup = async () => {
 			case 'KeyN':
 				noClip = !noClip;
 				break;
+			case 'KeyM':
+				lowRes = !lowRes;
+				level.setDetail(lowRes);
+				break;
+			case 'KeyT':
+				level.toggleThings();
+				break;
+			case 'KeyB':
+				level.toggleFullbright();
+				break;
 		}
 	};
 
 	document.addEventListener('keydown', onKeyDown);
 	document.addEventListener('keyup', onKeyUp);
 
-	level = new Level(map, wad, scene);
+	mainScene = new THREE.Scene();
+	mainScene.add(controls.object);
 
-	let hasSky = true;
+	level = new Level(map, wad, mainScene);
+
+	ms.setText(`${wadUrl.substr(6)}#${selectedMap}\nNow Starting...`);
 
 	await level.setup();
 
 	console.timeEnd('setup');
 
-	console.log(`Loading ${selectedMap}`);
+	document.addEventListener('click', async () => {
+		controls.lock();
+
+		for(const lumpName of wad.lumpNames)
+		{
+			if(lumpName.substr(0, 2) === 'DS')
+			{
+				// console.log(lumpName);
+				// await playSample(wad.sample(lumpName));
+			}
+		}
+
+	});
+
+	ms.remove();
+
+	const linkBox = document.querySelector('#wad-link');
+
+	if(!wadIsExternal && linkBox)
+	{
+		const link = document.createElement('a');
+		link.href = location.origin + location.pathname + '?wad=' + wadUrl.substr(6) + '&map=' + selectedMap;
+		link.innerText = '?wad=' + wadUrl.substr(6) + '&map=' + selectedMap;
+		linkBox.appendChild(link);
+	}
+
+	// const sTexture = new THREE.TextureLoader().load( await wad.picture('STCFN083').decode() );
+	// const sMaterial = new THREE.SpriteMaterial( { map: sTexture } );
+	// const sprite = new THREE.Sprite(sMaterial);
+	// sprite.position.set(camera.position.x, camera.position.y, camera.position.z);
+	// mainScene.add( sprite );
 }
 
 let then = 0;
@@ -2175,12 +2503,19 @@ const ldAction = (linedef, room, oRoom, dot) => {
 			if(dot < 0)
 			for(const room of level.tags.get(linedef.tag))
 			{
-				const sector = map.sector(room.index);
-				console.log(sector.bounds);
-				const flipped = flipVertex(map, {x:sector.bounds.xPosition, y: sector.bounds.yPosition});
-				camera.position.x = flipped.x;
-				camera.position.z = flipped.y;
-				break;
+				if(room.destination)
+				{
+					const flipped = flipVertex(map, {x:room.destination.x, y: room.destination.y});
+					camera.position.x = flipped.x;
+					camera.position.y = yCam = room.floorHeight + 48;
+					camera.position.z = flipped.y;
+					camera.rotation.x = 0;
+					camera.rotation.z = 0;
+					camera.rotation.y = (Math.PI / 2) * ((-90 + room.destination.angle) / 90);
+					xSpeed = 0;
+					ySpeed = 0;
+					break;
+				}
 			}
 			break;
 	}
@@ -2203,6 +2538,8 @@ const render = (now) => {
 
 	then = now;
 
+	level.simulate(delta);
+
 	const flipped = unflipVertex(map, {
 		x: camera.position.x,
 		y: camera.position.z,
@@ -2210,6 +2547,11 @@ const render = (now) => {
 
 	const sector = map.bspPoint(flipped.x, flipped.y);
 	const room = level.rooms.get(sector.index);
+
+	if(sector)
+	{
+		yCam = room.floorHeight + 48;
+	}
 
 	if(map.lumps.GL_PVS && map.lumps.GL_PVS.size)
 	{
@@ -2219,8 +2561,15 @@ const render = (now) => {
 		// console.log(visible);
 		for(const room of level.rooms.values())
 		{
-			if(visible.has(room.index)) room.show();
-			else room.hide();
+			if(!noClip)
+			{
+				if(visible.has(room.index)) room.show();
+				else room.hide();
+			}
+			else
+			{
+				room.show();
+			}
 		}
 	}
 
@@ -2395,6 +2744,8 @@ const render = (now) => {
 		}
 	}
 
+	renderer.render(mainScene, camera);
+
 	if(!noClip)
 	{
 		camera.position.x += xSpeed;
@@ -2407,10 +2758,8 @@ const render = (now) => {
 		camera.position.y += speedMag * -vCam * yImpulse * 0.5;
 	}
 
-	if(sector)
-	{
-		yCam = room.floorHeight + 48;
-	}
+	mainScene.background.repeat.set(-camera.aspect/2, 0.85);
+	mainScene.background.offset.set((-4*hCam)/(Math.PI*2), vCam + -0.15);
 
 	if(Math.abs(camera.position.y - yCam) < 1)
 	{
@@ -2440,19 +2789,13 @@ const render = (now) => {
 		}
 	}
 
-	scene.background.repeat.set(-camera.aspect/2, 0.85);
-	scene.background.offset.set((-4*hCam)/(Math.PI*2), vCam + -0.15);
-
-	level.simulate(delta);
-
-	renderer.render(scene, camera);
-
 	for(const [sample, {xPosition, yPosition, stereo, gain}] of samplesPlaying)
 	{
 		if(xPosition === undefined || yPosition === undefined) continue;
 		camera.getWorldDirection(camDir);
 		const unflipped = unflipVertex(map, {x: xPosition, y: yPosition});
 		const mag = Math.hypot(unflipped.y - camera.position.z, unflipped.x - camera.position.x);
+		if(mag === 0) return;
 		const vec = [unflipped.y - camera.position.z, unflipped.x - camera.position.x] // y, x
 		const dot = ((vec[0]/mag) * camDir.x - (vec[1]/mag) * camDir.z);
 		stereo.pan.value = dot;

@@ -6,7 +6,8 @@
   "scripts": {
     "build": "npx webpack build --mode=production",
     "serve": "npx webpack serve --mode=development",
-    "serve:prod": "npx webpack serve --mode=production"
+    "serve:prod": "npx webpack serve --mode=production",
+    "index-wads": "cd src/wads && node ../../bin/collect.mjs | tee ../wads.json"
   },
   "keywords": [],
   "author": "",

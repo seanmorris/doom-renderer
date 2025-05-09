@@ -16,7 +16,7 @@ const module = {
 		{
 			test: /\.(WAD|PNG|JSON|ICO)$/i,
 			type: 'asset/resource'
-		},
+		}
 	]
 };
 
@@ -38,7 +38,11 @@ const devServer = {
 	static: {
 		directory: path.resolve(fileURLToPath(import.meta.url), '../src'),
 		publicPath: '/src'
-	}
+	},
+	headers: {
+		'Cross-Origin-Embedder-Policy': 'require-corp',
+		'Cross-Origin-Opener-Policy': 'same-origin',
+	},
 };
 
 const output = {
@@ -47,4 +51,8 @@ const output = {
 	clean: true,
 };
 
-export default {module, plugins, devServer, output};
+const optimization = {
+	minimize: false,
+};
+
+export default {module, plugins, devServer, output, optimization};

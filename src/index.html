@@ -1,26 +1,85 @@
 <!DOCTYPE html>
 
-<body>
-	<div id="container">
-		<canvas id="c"></canvas>
-		<div id="labels"></div>
-	</div>
-</body>
-
 <head>
 		<meta charset="UTF-8">
-		<title>Doom Renderer</title>
+		<title>Doom Museum</title>
 		<meta name='viewport' content='width=device-width'/>
 		<style>
+		html body {
+			background-color: black;
+			color: #FFFFFF;
+			font-family: monospace;
+		}
+		html body::after {
+			background-image: var(--backdrop);
+			background-position: bottom;
+			background-size: cover;
+			image-rendering: pixelated;
+			opacity: 0.25;
+			content: '';
+			pointer-events: none;
+			position: absolute;
+			top: 0;
+			left: 0;
+			width: 100%;
+			height: 100%;
+		}
 		html, body, canvas {
 			margin: 0;
 			height: 100%;
+			font-size: 1.2rem;
 		}
-		#c {
+		#container {
+			position: absolute;
+			top: 0;
+			left: 0;
 			width: 100%;
 			height: 100%;
+		}
+		#container canvas {
+			position: relative;
 			display: block;
+			top: 0;
+			left: 0;
+			width: 100%;
+			height: 100%;
+			z-index: 10;
+		}
+		#container #loader {
+			position: absolute;
+			display: flex;
+			top: 0;
+			left: 0;
+			width: 100%;
+			height: 100%;
+			align-items: center;
+			justify-content: center;
+			text-align: center;
+		}
+		#container #wad-link:empty {
+			display: none;
+		}
+		#container #wad-link {
+			background-color: #FFFFFF80;
+			position: absolute;
+			top: 0;
+			right: 0;
+			font-size: 0.8rem;
+			padding: 0.3rem;
+			z-index: 11;
+		}
+		#container #loader img {
+			display: inline-block;
+			image-rendering: pixelated;
+			height: 2rem;
 		}
 		</style>
 </head>
 
+<body>
+	<div id="container">
+		<canvas></canvas>
+		<div id = "loader"></div>
+		<div id = "wad-link"></div>
+	</div>
+</body>

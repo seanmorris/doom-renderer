@@ -83075,7 +83075,7 @@ const runGlbsp = async (wadBuffer) => {
 };
 
 let level;
-
+const query = new URLSearchParams(location.search);
 const myWorker = new Worker(new URL(/* worker import */ __webpack_require__.p + __webpack_require__.u(922), __webpack_require__.b));
 
 const setup = async () => {
@@ -83090,8 +83090,6 @@ const setup = async () => {
 	{
 		prefix = '/doom-renderer'
 	}
-
-	const query = new URLSearchParams(location.search);
 
 	let selectedWad = query.has('wad') ? query.get('wad') : 'DOOM1.WAD';
 
@@ -83163,7 +83161,7 @@ const setup = async () => {
 
 	if(!mapsNames.includes(selectedMap))
 	{
-		throw new Error(`Map ${wadUrl.substr(6)} not found.`);
+		throw new Error(`Map ${String(wadUrl.substr(6))} not found.`);
 	}
 
 	map = wad.loadMap(selectedMap);
@@ -83174,7 +83172,7 @@ const setup = async () => {
 
 	if(!single.getLumpByName('GL_NODES'))
 	{
-		ms.setText(`${wadUrl.substr(6)}#${selectedMap}\nBuilding BSP Nodes`);
+		ms.setText(`${String(wadUrl.substr(6))}#${selectedMap}\nBuilding BSP Nodes`);
 
 		mapData = await runGlbsp(mapData);
 		map = wad.loadMap(selectedMap);
@@ -83192,7 +83190,7 @@ const setup = async () => {
 			}
 			else
 			{
-				ms.setText(`${wadUrl.substr(6)}#${selectedMap}\nPortal Sight-Checks Remaining: ${event.data.status}`);
+				ms.setText(`${String(wadUrl.substr(6))}#${selectedMap}\nPortal Sight-Checks Remaining: ${event.data.status}`);
 			}
 		});
 
@@ -83345,7 +83343,7 @@ const setup = async () => {
 
 	level = new Level(map, wad, mainScene);
 
-	ms.setText(`${wadUrl.substr(6)}#${selectedMap}\nNow Starting...`);
+	ms.setText(`${String(wadUrl.substr(6))}#${selectedMap}\nNow Starting...`);
 
 	await level.setup();
 
@@ -83372,8 +83370,8 @@ const setup = async () => {
 	if(!wadIsExternal && linkBox)
 	{
 		const link = document.createElement('a');
-		link.href = location.origin + location.pathname + '?wad=' + wadUrl.substr(6) + '&map=' + selectedMap;
-		link.innerText = '?wad=' + wadUrl.substr(6) + '&map=' + selectedMap;
+		link.href = location.origin + location.pathname + '?wad=' + String(wadUrl.substr(6)) + '&map=' + selectedMap;
+		link.innerText = '?wad=' + String(wadUrl.substr(6)) + '&map=' + selectedMap;
 		linkBox.appendChild(link);
 	}
 
@@ -83729,6 +83727,10 @@ const render = (now) => {
 						if(linedef.actionMeta.type === 'Exit')
 						{
 							console.log(`Next level is ${wad.findNextMap(map.name)}`);
+							if(query.get('random-level'))
+							{
+								location.reload();
+							}
 						}
 					}
 				}

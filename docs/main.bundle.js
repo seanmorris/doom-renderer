@@ -83161,7 +83161,7 @@ const setup = async () => {
 
 	if(!mapsNames.includes(selectedMap))
 	{
-		throw new Error(`Map ${String(wadUrl.substr(6))} not found.`);
+		throw new Error(`Map ${String(wadUrl).substr(6)} not found.`);
 	}
 
 	map = wad.loadMap(selectedMap);
@@ -83172,7 +83172,7 @@ const setup = async () => {
 
 	if(!single.getLumpByName('GL_NODES'))
 	{
-		ms.setText(`${String(wadUrl.substr(6))}#${selectedMap}\nBuilding BSP Nodes`);
+		ms.setText(`${String(wadUrl).substr(6)}#${selectedMap}\nBuilding BSP Nodes`);
 
 		mapData = await runGlbsp(mapData);
 		map = wad.loadMap(selectedMap);
@@ -83190,7 +83190,7 @@ const setup = async () => {
 			}
 			else
 			{
-				ms.setText(`${String(wadUrl.substr(6))}#${selectedMap}\nPortal Sight-Checks Remaining: ${event.data.status}`);
+				ms.setText(`${String(wadUrl).substr(6)}#${selectedMap}\nPortal Sight-Checks Remaining: ${event.data.status}`);
 			}
 		});
 
@@ -83343,7 +83343,7 @@ const setup = async () => {
 
 	level = new Level(map, wad, mainScene);
 
-	ms.setText(`${String(wadUrl.substr(6))}#${selectedMap}\nNow Starting...`);
+	ms.setText(`${String(wadUrl).substr(6)}#${selectedMap}\nNow Starting...`);
 
 	await level.setup();
 
@@ -83370,8 +83370,8 @@ const setup = async () => {
 	if(!wadIsExternal && linkBox)
 	{
 		const link = document.createElement('a');
-		link.href = location.origin + location.pathname + '?wad=' + String(wadUrl.substr(6)) + '&map=' + selectedMap;
-		link.innerText = '?wad=' + String(wadUrl.substr(6)) + '&map=' + selectedMap;
+		link.href = location.origin + location.pathname + '?wad=' + String(wadUrl).substr(6) + '&map=' + selectedMap;
+		link.innerText = '?wad=' + String(wadUrl).substr(6) + '&map=' + selectedMap;
 		linkBox.appendChild(link);
 	}
 

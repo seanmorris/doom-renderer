@@ -1,0 +1,53 @@
+// import Zdbsp from 'zdbsp-wasm/Zdbsp.mjs';
+
+// const runZdbsp = async (wadBuffer, mapName) => {
+// 	const zdbsp = await Zdbsp({
+// 		print: line => console.log(line),
+// 		printErr: line => {console.warn(line)},
+// 	});
+
+// 	zdbsp.FS.writeFile('/tmp/source.wad', new Uint8Array(wadBuffer));
+// 	const args = ['zdbsp', '-rg', '/tmp/source.wad', '-o', '/tmp/out.wad'];
+
+// 	const ptrs = args.map(part => {
+// 		const len = zdbsp.lengthBytesUTF8(part) + 1;
+// 		const loc = zdbsp._malloc(len);
+// 		zdbsp.stringToUTF8(part, loc, len);
+// 		return loc;
+// 	});
+
+// 	const arLoc = zdbsp._malloc(4 * ptrs.length);
+// 	try
+// 	{
+// 		for(const i in ptrs)
+// 		{
+// 			zdbsp.setValue(arLoc + 4 * i, ptrs[i], '*');
+// 		}
+
+// 		const process = zdbsp.ccall(
+// 			'main'
+// 			, 'number'
+// 			, ['number', 'number']
+// 			, [ptrs.length, arLoc]
+// 			, {async: true}
+// 		);
+
+// 		return zdbsp.FS.readFile('/tmp/out.wad');
+// 	}
+// 	catch(error)
+// 	{
+// 		if(typeof error === 'object' && (!('status' in error) || error.status !== 0))
+// 		{
+// 			throw error;
+// 		}
+// 		else
+// 		{
+// 			console.warn(error);
+// 		}
+// 	}
+// 	finally
+// 	{
+// 		ptrs.forEach(p => zdbsp._free(p));
+// 		zdbsp._free(arLoc);
+// 	}
+// };

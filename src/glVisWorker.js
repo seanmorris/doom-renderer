@@ -1,6 +1,7 @@
 import GlvisBinary from 'glvis-wasm/GlvisBinary.mjs';
 
 const runGlvis = async (wadBuffer, onOut, onErr) => {
+
 	const glvis = await GlvisBinary({
 		print: onOut || (line => console.log(line)),
 		printErr: onErr || (line => {

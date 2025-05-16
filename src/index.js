@@ -6,6 +6,7 @@ import { Wad, WadLoader } from 'doom-parser/Wad.mjs'
 import favicon from './favicon.ico';
 import { unflipVertex, flipVertex, samplesPlaying } from './helpers';
 import { Level } from './Level';
+import { cameraPosition, pass } from 'three/tsl';
 
 let camera, renderer, controls;
 let mainScene, uiScene;
@@ -19,7 +20,9 @@ let yVel = 0;
 
 let noClip = false;
 let lowRes = false;
-let paused = false;
+let paused = -1;
+let ignore = 0;
+let teleporting = false;
 
 class MessageString
 {
@@ -78,7 +81,7 @@ const lineIntersectsLine = (x1a, y1a, x2a, y2a, x1b, y1b, x2b, y2b) => {
 	const x = x1a + t * ax;
 	const y = y1a + t * ay;
 
-	return {x, y, t};
+	return {x, y, t, d};
 }
 
 const nearestPointOnLine = (px, py, x1, y1, x2, y2, clamped = false) => {
@@ -93,16 +96,18 @@ const nearestPointOnLine = (px, py, x1, y1, x2, y2, clamped = false) => {
 	const t = (((px - x1) * dx + (py - y1) * dy) / (dx**2 + dy**2));
 	const c = clamped ? Math.max(0, Math.min(1, t)) : t;
 
-	const x = x1 + c *dx;
-	const y = y1 + c *dy;
+	const x = x1 + c * dx;
+	const y = y1 + c * dy;
 
-	return {x, y, t:c};
+	const d = Math.hypot(py - y, px - x);
+
+	return {x, y, t:c, d};
 };
 
 // todo: finish implementing this
 const rayLinedefs = (map, x, y, angle, distance) => {
-	const xEnd = x + Math.sin(angle) * distance;
-	const yEnd = y + Math.cos(angle) * distance;
+	const xEnd = x + Math.cos(angle) * distance;
+	const yEnd = y + Math.sin(angle) * distance;
 
 	const xDir = Math.sign(xEnd - x);
 	const yDir = Math.sign(yEnd - y);
@@ -137,6 +142,8 @@ const setup = async () => {
 		'/wads/freedoom1.wad',
 		'/wads/freedoom2.wad',
 		'/wads/DOOM1.WAD',
+		'/wads/TEST.WAD',
+		// '/wads/HACKED2.WAD',
 	];
 
 	const iWadList = iwads.map(
@@ -146,7 +153,7 @@ const setup = async () => {
 	const pWadList = [];
 
 	let randomMap = null;
-	let selectedWad = query.has('wad') ? query.get('wad') : 'DOOM1.WAD';
+	let selectedWad = query.has('wad') ? query.get('wad') : false;
 
 	if(query.has('random-level'))
 	{
@@ -156,20 +163,21 @@ const setup = async () => {
 		selectedWad = wadList[randomIndex].wad;
 	}
 
-	let wadUrl = new URL(selectedWad, location.origin);
+	let wadUrl;
 	let wadIsExternal = false;
-
-	if(wadUrl.origin === location.origin)
-	{
-		wadUrl = 'https://level-archive.seanmorr.is/' + wadUrl.pathname.substr(1);
-	}
-	else
-	{
-		wadIsExternal = true;
-	}
 
 	if(selectedWad)
 	{
+		wadUrl = new URL(selectedWad, location.origin);
+
+		if(wadUrl.origin === location.origin)
+		{
+			wadUrl = 'https://level-archive.seanmorr.is/' + wadUrl.pathname.substr(1);
+		}
+		else
+		{
+			wadIsExternal = true;
+		}
 		const bytes = await (await fetch(wadUrl)).arrayBuffer();
 		pWadList.push(bytes);
 
@@ -182,6 +190,10 @@ const setup = async () => {
 			randomMap = maps[randomIndex];
 			console.log(randomMap);
 		}
+	}
+	else
+	{
+		wadUrl = new URL(iwads[iwads.length - 1], location.origin);
 	}
 
 	const wadList = await Promise.all([...iWadList, ...pWadList]);
@@ -202,7 +214,7 @@ const setup = async () => {
 
 	if(!mapsNames.includes(selectedMap))
 	{
-		throw new Error(`Map ${String(wadUrl).substr(6)} not found.`);
+		throw new Error(`Map ${String(selectedMap)} not found.`);
 	}
 
 	map = wad.loadMap(selectedMap);
@@ -213,7 +225,7 @@ const setup = async () => {
 
 	if(!single.getLumpByName('GL_NODES'))
 	{
-		ms.setText(`${String(wadUrl).substr(6)}#${selectedMap}\nBuilding BSP Nodes`);
+		ms.setText(`${String(wadUrl)}#${selectedMap}\nBuilding BSP Nodes`);
 
 		let accept;
 		const waiter = new Promise(a => accept = a);
@@ -243,7 +255,7 @@ const setup = async () => {
 			}
 			else
 			{
-				ms.setText(`${String(wadUrl).substr(6)}#${selectedMap}\nPortal Sight-Checks Remaining: ${event.data.status}`);
+				ms.setText(`${String(wadUrl)}#${selectedMap}\nPortal Sight-Checks Remaining: ${event.data.status}`);
 			}
 		});
 		glVis.postMessage(mapData);
@@ -357,24 +369,34 @@ const setup = async () => {
 			case 'KeyW':
 				moveForward = false;
 				break;
+
 			case 'ArrowLeft':
 			case 'KeyA':
 				moveLeft = false;
 				break;
+
 			case 'ArrowDown':
 			case 'KeyS':
 				moveBackward = false;
 				break;
+
 			case 'ArrowRight':
 			case 'KeyD':
 				moveRight = false;
 				break;
+
 			case 'KeyN':
 				noClip = !noClip;
 				break;
+
 			case 'KeyP':
-				paused = !paused;
+				paused = paused ? 0 : -1;
 				break;
+
+			case 'KeyO':
+				paused = 1;
+				break;
+
 			case 'KeyM':
 				lowRes = !lowRes;
 
@@ -390,10 +412,12 @@ const setup = async () => {
 				level.setDetail(lowRes);
 
 				break;
-			case 'KeyT':
+
+		case 'KeyT':
 				level.toggleThings();
 				break;
-			case 'KeyB':
+
+		case 'KeyB':
 				level.toggleFullbright();
 				break;
 		}
@@ -407,7 +431,7 @@ const setup = async () => {
 
 	level = new Level(map, wad, mainScene);
 
-	ms.setText(`${String(wadUrl).substr(6)}#${selectedMap}\nNow Starting...`);
+	ms.setText(`${String(wadUrl)}#${selectedMap}\nNow Starting...`);
 
 	await level.setup();
 
@@ -434,8 +458,8 @@ const setup = async () => {
 	if(!wadIsExternal && linkBox)
 	{
 		const link = document.createElement('a');
-		link.href = location.origin + location.pathname + '?wad=' + String(wadUrl).substr(6) + '&map=' + selectedMap;
-		link.innerText = '?wad=' + String(wadUrl).substr(6) + '&map=' + selectedMap;
+		link.href = location.origin + location.pathname + '?wad=' + String(wadUrl) + '&map=' + selectedMap;
+		link.innerText = '?wad=' + String(wadUrl) + '&map=' + selectedMap;
 		linkBox.appendChild(link);
 	}
 
@@ -456,7 +480,10 @@ const ldAction = (linedef, room, oRoom, dot) => {
 	switch(linedef.actionMeta.type)
 	{
 		case 'mDoor':
-			oRoom.openDoor(linedef.actionMeta.tm);
+			if(dot > 0)
+				room.openDoor(linedef.actionMeta.tm);
+			else
+				oRoom.openDoor(linedef.actionMeta.tm);
 			break;
 
 		case 'rDoor':
@@ -560,6 +587,19 @@ const ldAction = (linedef, room, oRoom, dot) => {
 				// up 512 (todo)
 				// up ShortestLowerTexture (todo)
 				// down to LEF (todo)
+				case 38:
+				case 23:
+				case 82:
+				case 60:
+				case 37:
+					for(const sector of level.tags.get(linedef.tag))
+					{
+						const lift = level.rooms.get(sector.index);
+						lift.lastAction = linedef.actionMeta;
+						lift.lowerLift(linedef.actionMeta);
+					}
+					break;
+					break;
 
 				// down to HEF + 8 (todo)
 				// donut (todo)
@@ -596,10 +636,14 @@ const ldAction = (linedef, room, oRoom, dot) => {
 		case 'Crush': // todo
 			break;
 		case 'Exit':  // todo
+			console.log(`Next level is ${wad.findNextMap(map.name)}`);
+			if(query.has('random-level'))
+			{
+				location.reload();
+			}
 			break;
 		case 'Light': // todo
 			break;
-
 
 		case 'Telpt':
 			if(dot < 0)
@@ -608,6 +652,7 @@ const ldAction = (linedef, room, oRoom, dot) => {
 				if(room.destination)
 				{
 					const flipped = flipVertex(map, {x:room.destination.x, y: room.destination.y});
+					teleporting = true;
 					camera.position.x = flipped.x;
 					camera.position.y = yCam = room.floorHeight + 48;
 					camera.position.z = flipped.y;
@@ -616,6 +661,7 @@ const ldAction = (linedef, room, oRoom, dot) => {
 					camera.rotation.y = (Math.PI / 2) * ((-90 + room.destination.angle) / 90);
 					xSpeed = 0;
 					ySpeed = 0;
+					ignore = 18;
 					break;
 				}
 			}
@@ -625,17 +671,263 @@ const ldAction = (linedef, room, oRoom, dot) => {
 
 let sThen = 0;
 
+class Line
+{
+	static lines = new Map;
+
+	static get(map, linedef)
+	{
+		if(!this.lines.has(linedef))
+		{
+			this.lines.set(linedef, new Line(map, linedef));
+		}
+
+		return this.lines.get(linedef);
+	}
+
+	constructor(map, linedef)
+	{
+		this.map = map;
+		this.linedef = linedef;
+		Object.freeze(this);
+	}
+
+	front(x, y)
+	{
+		const from = this.from;
+		const to   = this.to;
+
+		const pos  = [(from.y + to.y) / 2, (from.x + to.x) / 2]; // [y, x]
+		const vec  = [pos[0] - y, pos[1] - x]; // [y, x]
+		const mag  = Math.hypot(...vec);
+
+		vec[0] /= -mag;
+		vec[1] /= -mag;
+
+		if(this.dotNormal(...vec) > 0)
+		{
+			return this.right;
+		}
+		else
+		{
+			return this.left;
+		}
+	}
+
+	get normal()
+	{
+		const from = this.from;
+		const to   = this.to;
+
+		const vec  = [from.x - to.x, to.y - from.y]; // [y, x] (switched up for normal)
+		const mag  = Math.hypot(...vec);
+
+		vec[0] /= mag;
+		vec[1] /= mag;
+
+		return vec;
+	}
+
+	dotNormal(y, x)
+	{
+		const normal = this.normal;
+		return y * normal[0] + x * normal[1];
+	}
+
+	get right()
+	{
+		return Side.get(this.map, this.linedef);
+	}
+
+	get left()
+	{
+		return Side.get(this.map, this.linedef, true);
+	}
+
+	get from()
+	{
+		return this.map.vertex(this.linedef.from);
+	}
+
+	get to()
+	{
+		return this.map.vertex(this.linedef.to);
+	}
+}
+
+class Side
+{
+	static sides = new Map;
+
+	static get(map, linedef, isLeft = false)
+	{
+		if(!this.sides.has(linedef))
+		{
+			this.sides.set(linedef, new Map);
+		}
+
+		if(!this.sides.get(linedef).has(isLeft))
+		{
+			this.sides.get(linedef).set(isLeft, new Side(map, linedef, isLeft));
+		}
+
+		return this.sides.get(linedef).get(isLeft);
+	}
+
+	constructor(map, linedef, isLeft = false)
+	{
+		this.map = map;
+		this.linedef = linedef;
+		this.isLeft = isLeft;
+		Object.freeze(this);
+	}
+
+	get normal()
+	{
+		const from = this.from;
+		const to   = this.to;
+
+		const vec  = [from.x - to.x, to.y - from.y]; // [y, x] (switched up for normal)
+		const mag  = Math.hypot(...vec);
+
+		vec[0] /= mag;
+		vec[1] /= mag;
+
+		return vec;
+	}
+
+	dotNormal(y, x)
+	{
+		const normal = this.normal;
+		return y * normal[0] + x * normal[1];
+	}
+
+	isFacing(y, x)
+	{
+		const from = this.from;
+		const to   = this.to;
+
+		const pos  = [(from.y + to.y) / 2, (from.x + to.x) / 2]; // [y, x]
+		const vec  = [pos[0] - y, pos[1] - x]; // [y, x]
+		const mag  = Math.hypot(...vec);
+
+		vec[0] /= -mag;
+		vec[1] /= -mag;
+
+		return this.dotNormal(...vec) > 0;
+	}
+
+	isVisibleAroundCorner(x, y, otherSide)
+	{
+		const n = this.nearest(x, y, false);
+		const eVec = [n.y - y, n.x - x];
+		const eMag = Math.hypot(...eVec);
+
+		eVec[0] /= eMag;
+		eVec[1] /= eMag;
+
+		const fVec = [n.y - otherSide.from.y, n.x - otherSide.from.x];
+		const tVec = [n.y - otherSide.to.y,   n.x - otherSide.to.x];
+
+		const fMag = Math.hypot(...fVec);
+		const tMag = Math.hypot(...tVec);
+
+		fVec[0] /= fMag;
+		fVec[1] /= fMag;
+		tVec[0] /= tMag;
+		tVec[1] /= tMag;
+
+		const fDot = fVec[0] * eVec[0] + fVec[1] * eVec[1];
+		const tDot = tVec[0] * eVec[0] + tVec[1] * eVec[1];
+
+		const ep = Number.EPSILON * 1000;
+
+		return fDot > ep || tDot > ep;
+	}
+
+	nearest(x, y, clamped = false)
+	{
+		const from = this.from;
+		const to   = this.to;
+
+		return nearestPointOnLine(x, y, from.x, from.y, to.x, to.y, clamped);
+	}
+
+	frontRoom(x, y)
+	{
+		const sidedef = this.map.sidedef(
+			(this.isFacing(y, x) && !this.isLeft) ? this.linedef.right : this.linedef.left
+		);
+
+		return level.rooms.get(sidedef.sector);
+	}
+
+	backRoom(x, y)
+	{
+		const sidedef = this.map.sidedef(
+			(this.isFacing(y, x) && !this.isLeft) ? this.linedef.left : this.linedef.right
+		);
+		return sidedef && level.rooms.get(sidedef.sector);
+	}
+
+	get from()
+	{
+		return this.map.vertex(this.isLeft ? this.linedef.to : this.linedef.from);
+	}
+
+	get to()
+	{
+		return this.map.vertex(this.isLeft ? this.linedef.from : this.linedef.to);
+	}
+
+	passable(x, y)
+	{
+		if(this.linedef.flags & 0b1)
+		{
+			return false;
+		}
+
+		const frontRoom = this.frontRoom(x, y);
+		const backRoom = this.backRoom(x, y);
+
+		if(!backRoom)
+		{
+			return false;
+		}
+
+		if(backRoom.floorHeight - frontRoom.floorHeight > 32)
+		{
+			return false;
+		}
+
+		if(backRoom.ceilingHeight - backRoom.floorHeight < 48)
+		{
+			return false;
+		}
+
+		return true;
+	}
+}
+
 const simulate = (now) => {
 	setTimeout(() => simulate(performance.now()), 0);
 
-	if(paused) return;
+	if(paused > 0)
+	{
+		paused--;
+	}
+	else if(paused === 0)
+	{
+		// controls.isLocked = true;
+		return;
+	}
 
 	const delta = Math.min(32, now - sThen);
 
 	if(delta < 16) return;
-	// if(delta < 1/35) return;
-
 	sThen = now;
+
+	const ticFrac = (delta/1000) / (1/35);
 
 	if(!camera || !level || !level.rooms) return;
 
@@ -649,200 +941,362 @@ const simulate = (now) => {
 	const hCam = Math.atan2(camDir.z, camDir.x);
 	const vCam = camDir.y;
 
-	const xImpulse = Number(moveRight) - Number(moveLeft);
-	const yImpulse = Number(moveBackward) - Number(moveForward);
+	const xImpulse = ignore ? 0 : Number(moveRight) - Number(moveLeft);
+	const yImpulse = ignore ? 0 : Number(moveBackward) - Number(moveForward);
 
-	const impulseDir = Math.atan2(1.25 * yImpulse, xImpulse) + hCam + Math.PI/2;
-	const impulseMag = Math.hypot(1.25 * yImpulse, xImpulse);
+	if(ignore > 0)
+	{
+		ignore--;
+	}
 
-	const xSpeedChange = Math.cos(impulseDir) * impulseMag * 0.03125 * ((16/1000) / (1/35));
-	const ySpeedChange = Math.sin(impulseDir) * impulseMag * 0.03125 * ((16/1000) / (1/35));
+	const impulseDir = Math.atan2(yImpulse, 0.75 * xImpulse) + hCam + Math.PI/2;
+	const impulseMag = Math.hypot(yImpulse, 0.75 * xImpulse);
+
+	const xSpeedChange = Math.cos(impulseDir) * impulseMag * 0.03125 * ticFrac;
+	const ySpeedChange = Math.sin(impulseDir) * impulseMag * 0.03125 * ticFrac;
 
 	xSpeed += xSpeedChange * 40;
 	ySpeed += ySpeedChange * 40;
 
-	xSpeed *= 0.90625 ** ((16/1000) / (1/35));
-	ySpeed *= 0.90625 ** ((16/1000) / (1/35));
+	xSpeed *= 0.90625 ** ticFrac;
+	ySpeed *= 0.90625 ** ticFrac;
 
-	const flipped = unflipVertex(map, {x: camera.position.x, y: camera.position.z,});
-	const lines = map.blocksNearPoint(flipped.x, flipped.y);
+	const entityPos = unflipVertex(map, {x: camera.position.x, y: camera.position.z});
+	const lines = map.blocksNearPoint(entityPos.x, entityPos.y);
 
-	const xCam = camera.position.x;
-	const zCam = camera.position.z;
-	let wallHit = false;
+	const xCam  = camera.position.x;
+	const zCam  = camera.position.z;
+
+	const speedMag  = Math.hypot(ySpeed, xSpeed);
+
+	const speedNVec = [-ySpeed / speedMag, xSpeed / speedMag];
+	const speedDir  = Math.atan2(...speedNVec);
+
+	const speedCNVec = [ySpeed / speedMag, xSpeed / speedMag];
+	const speedCDir  = Math.atan2(...speedCNVec);
+
+	const solidLines   = new Set;
+
+	const radius = 16;
 
 	for(const l of lines)
 	{
-		const speedMag = Math.hypot(ySpeed, xSpeed);
-
-		if(speedMag < 0.01) break;
-
-		const speedDir = Math.atan2(ySpeed, xSpeed);
-		const speedNVec = [xSpeed / speedMag / ySpeed / speedMag];
 		const linedef = map.linedef(l);
+		const line  = Line.get(map, linedef);
+		const front = line.front(entityPos.x, entityPos.y);
+
 		const from = map.vertex(linedef.from);
-		const to = map.vertex(linedef.to);
+		const to   = map.vertex(linedef.to);
+
 		const flippedFrom = flipVertex(map, from);
 		const flippedTo   = flipVertex(map, to);
 
-		const intersection = lineIntersectsLine(
+		const preNearest = nearestPointOnLine(
 			xCam, zCam,
-			xCam + Math.cos(speedDir) * speedMag, zCam + Math.sin(speedDir) * speedMag,
 			flippedFrom.x, flippedFrom.y,
-			flippedTo.x,   flippedTo.y
+			flippedTo.x, flippedTo.y,
+			true,
 		);
 
-		const rigthSide = map.sidedef(linedef.right);
-		const leftSide = linedef.left > -1 && map.sidedef(linedef.left);
+		const nearest = nearestPointOnLine(
+			xCam + xSpeed, zCam + ySpeed,
+			flippedFrom.x, flippedFrom.y,
+			flippedTo.x, flippedTo.y,
+			true,
+		);
 
-		const rSector = map.sector(rigthSide.sector);
-		const lSector = leftSide.sector > -1 && map.sector(leftSide.sector);
+		const lineMag   = Math.hypot(to.y - from.y, to.x - from.x);
+		const linePos   = [(to.y + from.y) / 2, (to.x + from.x) / 2]; // [y, x]
 
-		const rRoom = level.rooms.get(rSector.index);
-		const lRoom = lSector && level.rooms.get(lSector.index);
+		const lineVec   = [(to.y - from.y) / lineMag, (to.x - from.x) / lineMag]; // [y, x]
+		const lineNVec  = [lineVec[1], lineVec[0]]; // [y, x]
+		const lineNDot  = lineNVec[0] * (speedMag ? ySpeed/speedMag : 0) + lineNVec[1] * (speedMag ? xSpeed/speedMag : 0);
 
-		const fromDir  = Math.atan2(flippedFrom.y - zCam, flippedFrom.x - xCam);
-		const xFromVec = Math.cos(fromDir);
-		const yFromVec = Math.sin(fromDir);
+		const lineTVec  = [(zCam + -preNearest.y) / preNearest.d, (xCam + -preNearest.x) / preNearest.d]; // [y, x]
+		const lineTDot  = lineTVec[0] * (speedMag ? ySpeed/speedMag : 0) + lineTVec[1] * (speedMag ? xSpeed/speedMag : 0);
 
-		const toDir    = Math.atan2(flippedTo.y - zCam, flippedTo.x - xCam);
-		const xToVec   = Math.cos(toDir);
-		const yToVec   = Math.sin(toDir);
+		const rightSide = map.sidedef(linedef.right);
+		const leftSide  = linedef.left > -1 && map.sidedef(linedef.left);
 
-		// const fromDot  = (xCamVec * xFromVec + zCamVec * yFromVec);
-		// const toDot    = (xCamVec * xToVec + zCamVec * yToVec);
-		const fromDot  = (speedNVec[0] * xFromVec + speedNVec[1] * yFromVec);
-		const toDot    = (speedNVec[0] * xToVec   + speedNVec[1] * yToVec);
+		const rSector   = map.sector(rightSide.sector);
+		const lSector   = leftSide.sector > -1 && map.sector(leftSide.sector);
 
-		const lineMag  = Math.hypot(to.y - from.y, to.x - from.x);
-		const lineDir  = Math.atan2(to.y - from.y, to.x - from.x);
-		const lineVec  = [(to.y - from.y) / lineMag, (to.x - from.x) / lineMag]; // [y, x]
-		const lineNVec = [lineVec[1], lineVec[0]]; // [y, x]
-		const lineNDot = (lineNVec[0] * (ySpeed/speedMag) + lineNVec[1] * (xSpeed/speedMag));
-		const room     = lineNDot < 0 ? rRoom : lRoom;
-		const oRoom    = lineNDot > 0 ? rRoom : lRoom;
+		const rRoom     = level.rooms.get(rSector.index);
+		const lRoom     = lSector && level.rooms.get(lSector.index);
+		const room      = lineNDot < 0 ? rRoom : lRoom;
+		const oRoom     = lineNDot > 0 ? rRoom : lRoom;
 
-		let passable = !(linedef.flags & 0b00000001);
+		let passable = !(linedef.flags & 0b1);
 
-		if((camera.position.y === room.floorHeight && (camera.position.y - oRoom.floorHeight) < 24)
-			|| (camera.position.y > room.floorHeight && (camera.position.y - oRoom.floorHeight) < 4)
-			|| Math.abs(room.ceilingHeight - room.floorHeight) < 48
-		){
-			passable = false;
-		}
+		const footPosition = camera.position.y - 48;
 
-		if(!oRoom || (
-			(oRoom.ceilingHeight - oRoom.floorHeight) < 48
-			|| (oRoom.ceilingHeight - oRoom.floorHeight) < 48
-			|| (oRoom.ceilingHeight - room.floorHeight)  < 48
-			|| (room.ceilingHeight  - oRoom.floorHeight) < 48
+		if(passable && (
+			// (oRoom.floorHeight - footPosition >= 32 && Math.abs(room.floorHeight - oRoom.floorHeight) >= 32)
+			(oRoom.floorHeight - footPosition >= 32)
+			|| (oRoom.ceilingHeight - footPosition <= 32)
+			|| Math.abs(oRoom.ceilingHeight - oRoom.floorHeight) < 48
+			|| Math.abs(oRoom.ceilingHeight - room.floorHeight) < 48
 		)){
 			passable = false;
 		}
 
-		if(noClip)
-		{
-			passable = true;
-		}
+		if(nearest.d > radius || nearest.t < 0 || nearest.t > 1) continue;
 
 		if(!passable)
 		{
-			const nearest = nearestPointOnLine(
-				xCam + xSpeed, zCam + ySpeed,
-				flippedFrom.x, flippedFrom.y,
-				flippedTo.x, flippedTo.y,
-			);
-
-			const nearestLineVec = [zCam - nearest.y, xCam - nearest.x]
-			const nearestLineDir = Math.atan2(...nearestLineVec);
-			const nearestLineMag = Math.hypot(...nearestLineVec);
-
-			const speedLineDot = (nearestLineVec[0] * ySpeed + nearestLineVec[1] * xSpeed);
-			const margin = 0;
-
-			if(speedLineDot <= 0 && 16 - nearestLineMag > 0 && nearest.t > (0 - margin) && nearest.t < (1 + margin))
-			{
-				console.log(
-					'n',
-					nearest,
-					nearestLineMag,
-					linedef,
-					{xSpeed, ySpeed},
-					nearestLineVec,
-					Math.cos(nearestLineDir + Math.PI) * -(16 - nearestLineMag),
-					Math.sin(nearestLineDir + Math.PI) * -(16 - nearestLineMag)
-				);
-
-				camera.position.x += Math.cos(nearestLineDir + Math.PI) * -(16-nearestLineMag);
-				camera.position.z += Math.sin(nearestLineDir + Math.PI) * -(16-nearestLineMag);
-
-				// camera.position.x += Math.cos(speedDir) * -(16-nearestLineMag);
-				// camera.position.z += Math.sin(speedDir) * -(16-nearestLineMag);
-
-				xSpeed = Math.cos(nearestLineDir + Math.PI) * -Math.min(16 - nearestLineMag, speedMag);
-				ySpeed = Math.sin(nearestLineDir + Math.PI) * -Math.min(16 - nearestLineMag, speedMag);
-
-				if(fromDot > 0)
-				{
-					xSpeed = Math.cos(lineDir) * -speedMag;
-					ySpeed = Math.sin(lineDir) * -speedMag;
-				}
-				else if(toDot > 0)
-				{
-					xSpeed = Math.cos(lineDir) * speedMag;
-					ySpeed = Math.sin(lineDir) * speedMag;
-				}
-
-				if(room && lineNDot < 0 && linedef.actionMeta && linedef.actionMeta.modifier.indexOf('S') > -1)
-				{
-					room.lastAction = linedef.actionMeta;
-					room.flipSwitch(linedef);
-					ldAction(linedef, room, oRoom, lineNDot);
-					if(linedef.actionMeta.type === 'Exit')
-					{
-						console.log(`Next level is ${wad.findNextMap(map.name)}`);
-						if(query.has('random-level'))
-						{
-							location.reload();
-						}
-					}
-				}
-			}
-			else if(intersection)
-			{
-				console.log('i', intersection, linedef);
-
-				camera.position.x += Math.cos(speedDir) * -Math.min(16 - speedMag * intersection.t, speedMag);
-				camera.position.z += Math.sin(speedDir) * -Math.min(16 - speedMag * intersection.t, speedMag);
-
-				if(fromDot > 0)
-				{
-					xSpeed = Math.cos(fromDir) * speedMag;
-					ySpeed = Math.sin(fromDir) * speedMag;
-				}
-				else if(toDot > 0)
-				{
-					xSpeed = Math.cos(toDir) * speedMag;
-					ySpeed = Math.sin(toDir) * speedMag;
-				}
-			}
+			solidLines.add({
+				nearest,
+				linedef,
+				front,
+				from,
+				to,
+				preNearest,
+				normal: lineNVec,
+				dot: lineTDot,
+				nDot: lineNDot,
+				pos: linePos
+			});
 		}
-		else if(intersection)
+
+		if(speedMag)
 		{
-			if(linedef.actionMeta && linedef.actionMeta.modifier.indexOf('W') > -1)
+			if(linedef.actionMeta && linedef.actionMeta.modifier.indexOf('S') > -1)
+			{
+				if(lineNDot < 0)
+				{
+					room && room.flipSwitch(linedef);
+					ldAction(linedef, room, oRoom, lineNDot);
+				}
+			}
+
+			if(passable && linedef.actionMeta && linedef.actionMeta.modifier.indexOf('W') > -1)
+			{
+				ldAction(linedef, room, oRoom, lineNDot);
+			}
+
+			if(linedef.actionMeta && linedef.actionMeta.modifier.indexOf('G') > -1)
 			{
 				ldAction(linedef, room, oRoom, lineNDot);
 			}
 		}
 	}
 
-	if(Math.abs(xSpeed) < 0.1) xSpeed = 0;
-	if(Math.abs(ySpeed) < 0.1) ySpeed = 0;
+	const sorted = [...solidLines.values()].sort((i,j) => Math.sign( i.preNearest.d - j.preNearest.d ));
 
 	if(!noClip)
 	{
-		if(!wallHit)
+		if(speedMag && !teleporting)
 		{
+			if(sorted.length === 1)
+			{
+				const nearest = sorted[0].nearest;
+
+				if(nearest.d < radius && nearest.t > 0 && nearest.t < 1)
+				{
+					const line = Line.get(map, sorted[0].linedef);
+					const side = line.right.isFacing(entityPos.y, entityPos.x)
+						? line.right
+						: line.left;
+
+					const nearestLineVec = [zCam - nearest.y, xCam - nearest.x];
+					const nearestLineDir = Math.atan2(...nearestLineVec);
+
+					const fVec = [entityPos.y - sorted[0].from.y, entityPos.x - sorted[0].from.x];
+					const tVec = [entityPos.y - sorted[0].to.y,   entityPos.x - sorted[0].to.x];
+					const fMag = Math.hypot(...fVec);
+					const tMag = Math.hypot(...tVec);
+					fVec[0] /= fMag;
+					fVec[1] /= fMag;
+					tVec[0] /= tMag;
+					tVec[1] /= tMag;
+
+					const fDot = speedNVec[0] * fVec[0] + speedNVec[1] * fVec[1];
+					// const tDot = speedNVec[0] * tVec[0] + speedNVec[1] * tVec[1];
+
+					const endPoint = fDot < 0 ? sorted[0].from : sorted[0].to;
+					const lineIds = map.blocksNearPoint(endPoint.x, endPoint.y);
+
+					const sides = [];
+
+					for(const id of lineIds)
+					{
+						const linedef = map.linedef(id);
+
+						if(linedef === sorted[0].linedef || (linedef.from !== endPoint.index && linedef.to !== endPoint.index))
+						{
+							continue;
+						}
+
+						const line = new Line(map, linedef);
+
+						sides.push(line.right, line.left);
+					}
+
+					const facing = sides
+					.filter(s =>
+						s.isFacing(entityPos.y, entityPos.x)
+						&& side.isVisibleAroundCorner(entityPos.x, entityPos.y, s)
+						&& !s.passable(entityPos.x, entityPos.y))
+					.sort((s, t) => s.dotNormal(...side.normal) - t.dotNormal(...side.normal));
+
+					if(facing[0])
+					{
+						const backRoom = facing[0].backRoom(entityPos.x, entityPos.y);
+
+						// console.log(backRoom && backRoom.index);
+
+						const s = facing[0].dotNormal(...side.normal);
+						const c = Math.sqrt(1 - s**2);
+						const h = Math.sqrt((1 - c) / 2);
+
+						const n = facing[0].nearest(entityPos.x, entityPos.y, true);
+
+						if(s < 0 && h > 0 && n.d < radius / h)
+						{
+							xSpeed -= Math.cos(speedCDir) * Math.min(radius / h, speedMag);
+							ySpeed -= Math.sin(speedCDir) * Math.min(radius / h, speedMag);
+						}
+						else
+						{
+							xSpeed += Math.cos(nearestLineDir) * Math.min(radius - nearest.d, speedMag);
+							ySpeed += Math.sin(nearestLineDir) * Math.min(radius - nearest.d, speedMag);
+						}
+					}
+					else
+					{
+						xSpeed += Math.cos(nearestLineDir) * Math.min(radius - nearest.d, speedMag);
+						ySpeed += Math.sin(nearestLineDir) * Math.min(radius - nearest.d, speedMag);
+					}
+
+
+				}
+			}
+			else if(sorted.length > 1)
+			{
+				const dotA = sorted[0].dot;
+				const dotB = sorted[1].dot;
+
+				if(dotA < 0 || dotB < 0)
+				{
+					let vertex;
+
+					if(sorted[0].linedef.from === sorted[1].linedef.to || sorted[0].linedef.from === sorted[1].linedef.from)
+					{
+						vertex = level.map.vertex(sorted[0].linedef.from);
+					}
+					else if(sorted[0].linedef.to === sorted[1].linedef.from || sorted[0].linedef.to === sorted[1].linedef.to)
+					{
+						vertex = level.map.vertex(sorted[0].linedef.to);
+					}
+
+					const nDotA = sorted[0].nDot;
+					const nDotB = sorted[1].nDot;
+					const normalA = [sorted[0].normal[0] * -Math.sign(nDotA), sorted[0].normal[1] * -Math.sign(nDotA)];
+					const normalB = [sorted[1].normal[0] * -Math.sign(nDotB), sorted[1].normal[1] * -Math.sign(nDotB)];
+
+					const gNormalA = [sorted[0].normal[0], sorted[0].normal[1]];
+					const gNormalB = [sorted[1].normal[0], sorted[1].normal[1]];
+
+					const dot = normalA[0] * normalB[0] + normalA[1] * normalB[1];
+					const sum = [normalA[0] + normalB[0], normalA[1] + normalB[1]];
+					const mag = Math.hypot(sum[0], sum[1]);
+					const avg = [sum[0] / mag, sum[1] / mag];
+
+					const sinHalf = normalA[0] * avg[0] + normalA[1] * avg[1];
+
+					if(vertex)
+					{
+						const dif = [
+							-(sorted[0].pos[0] - sorted[1].pos[0]),
+							-(sorted[0].pos[1] - sorted[1].pos[1]),
+						];
+
+						const mag = Math.hypot(...dif);
+						const vec = [dif[0] / mag, dif[1] / mag];
+
+						const flipped = flipVertex(map, vertex);
+
+						const concDot = -normalA[0] * vec[0] + normalA[1] * vec[1];
+						const concave = 0 < concDot;
+
+						if(dot === 0)
+						{
+							if(concave)
+							{
+								xSpeed = 0;
+								ySpeed = 0;
+							}
+							else
+							{
+								// const sDot = avg[0] * speedNVec[0] + avg[1] * speedNVec[1];
+								// if(sDot < 0)
+								// {
+								// }
+
+								const vec = [zCam - flipped.y, xCam - flipped.x];
+								const dir = Math.atan2(...vec);
+
+								camera.position.x += Math.cos(dir) * Math.min(radius - sorted[0].nearest.d) + 0.1;
+								camera.position.z += Math.sin(dir) * Math.min(radius - sorted[0].nearest.d) + 0.1;
+							}
+						}
+						else if(dot === 1)
+						{
+							const dir = Math.atan2(zCam - sorted[0].nearest.y, xCam - sorted[0].nearest.x);
+
+							xSpeed += Math.cos(dir) * Math.min(radius - sorted[0].nearest.d, speedMag);
+							ySpeed += Math.sin(dir) * Math.min(radius - sorted[0].nearest.d, speedMag);
+
+						}
+						else if(dot < 0)
+						{
+							const sum = [normalA[0] + normalB[0], normalA[1] + normalB[1]];
+							const mag = Math.hypot(sum[0], sum[1]);
+							const avg = [sum[0] / mag, sum[1] / mag];
+
+							const concDot = -normalA[0] * vec[0] + normalA[1] * vec[1];
+							const concave = 0 < concDot;
+
+							if(concave)
+							{
+								if(sorted[0].front.isVisibleAroundCorner(entityPos.x, entityPos.y, sorted[1].front))
+								{
+									console.log(dot);
+									// xSpeed += avg[1] * ((radius - sorted[0].nearest.d) / sinHalf) + 0.1;
+									// ySpeed += avg[0] * ((radius - sorted[0].nearest.d) / sinHalf) + 0.1;
+									camera.position.x = flipped.x + avg[1] * (radius / sinHalf) + 0.1;
+									camera.position.z = flipped.y + avg[0] * (radius / sinHalf) + 0.1;
+									xSpeed = 0;
+									ySpeed = 0;
+								}
+								else
+								{
+									console.log(`${sorted[0].front.linedef.index} occludes ${sorted[1].front.linedef.index}`)
+								}
+							}
+							else
+							{
+								// const sDot = avg[0] * speedNVec[0] + avg[1] * speedNVec[1];
+								// if(sDot < 0)
+								// {
+								// }
+
+								const vec = [zCam - flipped.y, xCam - flipped.x];
+								const dir = Math.atan2(...vec);
+
+								camera.position.x += Math.cos(dir) * Math.min(radius - sorted[0].nearest.d, speedMag);
+								camera.position.z += Math.sin(dir) * Math.min(radius - sorted[0].nearest.d, speedMag);
+							}
+						}
+						else if(dot < 1)
+						{
+							xSpeed += avg[1] * ((radius - sorted[0].nearest.d) / sinHalf) + 0.1;
+							ySpeed += avg[0] * ((radius - sorted[0].nearest.d) / sinHalf) + 0.1;
+						}
+					}
+				}
+			}
+
 			camera.position.x += xSpeed;
 			camera.position.z += ySpeed;
 		}
@@ -899,6 +1353,8 @@ const simulate = (now) => {
 		mainScene.background.repeat.set(-camera.aspect/2, 0.85);
 		mainScene.background.offset.set((-4*hCam)/(Math.PI*2), vCam + -0.15);
 	}
+
+	teleporting = false;
 };
 
 simulate(performance.now());
@@ -937,15 +1393,8 @@ const render = (now) => {
 
 		for(const room of level.rooms.values())
 		{
-			if(!noClip)
-			{
-				if(visible.has(room.index)) room.show();
-				else room.hide();
-			}
-			else
-			{
-				room.show();
-			}
+			if(visible.has(room.index)) room.show();
+			else room.hide();
 		}
 	}
 

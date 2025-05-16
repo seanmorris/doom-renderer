@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
-import { byteToLightOffset, flipVertex, isTextureName, loadTexture, textureLoader, missing, playSample } from './helpers';
+import { byteToLightOffset, flipVertex, isTextureName, loadTexture, textureLoader, missing, playSample, unflipVertex } from './helpers';
 
 export class Room extends EventTarget
 {
@@ -407,6 +407,8 @@ export class Room extends EventTarget
 
 	openDoor(closeTime)
 	{
+		if(this.floorMoving || this.ceilingMoving) return;
+
 		if(this.timer || this.ceilingHeight !== this.targetCeilingHeight)
 		{
 			return false;
@@ -432,6 +434,8 @@ export class Room extends EventTarget
 
 	closeDoor()
 	{
+		if(this.floorMoving || this.ceilingMoving) return;
+
 		if(this.timer || this.ceilingHeight !== this.targetCeilingHeight)
 		{
 			return false;
@@ -444,17 +448,20 @@ export class Room extends EventTarget
 
 	lowerCeiling(modifier, time)
 	{
+		if(this.floorMoving || this.ceilingMoving) return;
 		this.targetCeilingHeight = this.floorHeight;
 	}
 
 	lowerLift(action)
 	{
+		if(this.floorMoving || this.ceilingMoving) return;
+
 		if(this.timer || this.ceilingHeight !== this.targetCeilingHeight)
 		{
 			return false;
 		}
 
-		const time = action.tm > 0 ? action.tm : 6;
+		const time = action.tm > 0 ? action.tm : 36;
 
 		this.closeTime = time * 1000;
 
@@ -474,7 +481,9 @@ export class Room extends EventTarget
 
 	raiseFloor(action)
 	{
-		const time = action.tm > 0 ? action.tm : 6;
+		if(this.floorMoving || this.ceilingMoving) return;
+
+		const time = action.tm > 0 ? action.tm : 36;
 
 		if(this.timer || this.ceilingHeight !== this.targetCeilingHeight)
 		{
@@ -499,7 +508,9 @@ export class Room extends EventTarget
 
 	raiseCeiling(action)
 	{
-		const time = action.tm > 0 ? action.tm : 6;
+		if(this.floorMoving || this.ceilingMoving) return;
+
+		const time = action.tm > 0 ? action.tm : 36;
 
 		if(this.timer || this.ceilingHeight !== this.targetCeilingHeight)
 		{
@@ -524,6 +535,8 @@ export class Room extends EventTarget
 
 	moveCeiling(to)
 	{
+		if(this.floorMoving || this.ceilingMoving) return;
+
 		this.targetCeilingHeight = to;
 	}
 
@@ -538,7 +551,7 @@ export class Room extends EventTarget
 			const left = linedef.left > -1 && this.level.map.sidedef(linedef.left);
 
 			if(!left) continue;
-			const lSector = left && map.sector(left.sector);
+			const lSector = left && this.level.map.sector(left.sector);
 
 			if(lSector && lSector.index !== this.index && lSector.floorFlat === this.floorFlat)
 			{
@@ -750,7 +763,7 @@ export class Room extends EventTarget
 		const from = flipVertex(this.level.map, this.level.map.vertex(linedef.from));
 		const to   = flipVertex(this.level.map, this.level.map.vertex(linedef.to));
 
-		const length =  Math.hypot(to.y - from.y, to.x - from.x);
+		const length =  Math.ceil(Math.hypot(to.y - from.y, to.x - from.x));
 		const angle  = -Math.atan2(to.y - from.y, to.x - from.x);
 
 		const xCenter = (from.x + to.x) / 2;
@@ -1290,8 +1303,8 @@ export class Room extends EventTarget
 
 		let xfOffset = 0;
 		let xcOffset = 0;
-		let yfOffset = this.level.map.bounds.yPosition % 64;
-		let ycOffset = this.level.map.bounds.yPosition % 64;
+		let yfOffset = (this.level.map.bounds.yMin - this.level.map.bounds.yMax) % 64;
+		let ycOffset = (this.level.map.bounds.yMin - this.level.map.bounds.yMax) % 64;
 
 		this.setUV(floorGeometry, xfOffset, yfOffset);
 		this.setUV(ceilingGeometry, xcOffset, ycOffset);
@@ -1307,7 +1320,7 @@ export class Room extends EventTarget
 		}
 	}
 
-	setUV(geometry, xOffset, yOffset)
+	setUV(geometry, xOffset = 0, yOffset = 0)
 	{
 		const pos = geometry.attributes.position;
 		const box = new THREE.Box3().setFromBufferAttribute(pos);

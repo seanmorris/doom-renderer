@@ -927,7 +927,7 @@ const simulate = (now) => {
 	if(delta < 16) return;
 	sThen = now;
 
-	const ticFrac = (delta/1000) / (1/35);
+	const ticFrac = (delta/1000) * 35;
 
 	if(!camera || !level || !level.rooms) return;
 
@@ -1002,7 +1002,7 @@ const simulate = (now) => {
 			xCam + xSpeed, zCam + ySpeed,
 			flippedFrom.x, flippedFrom.y,
 			flippedTo.x, flippedTo.y,
-			true,
+			false,
 		);
 
 		const lineMag   = Math.hypot(to.y - from.y, to.x - from.x);
@@ -1028,7 +1028,7 @@ const simulate = (now) => {
 
 		let passable = !(linedef.flags & 0b1);
 
-		const footPosition = camera.position.y - 48;
+		const footPosition = yCam - 48;
 
 		if(passable && (
 			// (oRoom.floorHeight - footPosition >= 32 && Math.abs(room.floorHeight - oRoom.floorHeight) >= 32)
@@ -1153,8 +1153,8 @@ const simulate = (now) => {
 
 						if(s < 0 && h > 0 && n.d < radius / h)
 						{
-							xSpeed -= Math.cos(speedCDir) * Math.min(radius / h, speedMag);
-							ySpeed -= Math.sin(speedCDir) * Math.min(radius / h, speedMag);
+							xSpeed -= Math.cos(speedCDir) * Math.min(radius / h - nearest.d, speedMag);
+							ySpeed -= Math.sin(speedCDir) * Math.min(radius / h - nearest.d, speedMag);
 						}
 						else
 						{
@@ -1264,8 +1264,8 @@ const simulate = (now) => {
 									console.log(dot);
 									// xSpeed += avg[1] * ((radius - sorted[0].nearest.d) / sinHalf) + 0.1;
 									// ySpeed += avg[0] * ((radius - sorted[0].nearest.d) / sinHalf) + 0.1;
-									camera.position.x = flipped.x + avg[1] * (radius / sinHalf) + 0.1;
-									camera.position.z = flipped.y + avg[0] * (radius / sinHalf) + 0.1;
+									camera.position.x = flipped.x + avg[1] * (radius / sinHalf - sorted[0].nearest.d) + 0.1;
+									camera.position.z = flipped.y + avg[0] * (radius / sinHalf - sorted[0].nearest.d) + 0.1;
 									xSpeed = 0;
 									ySpeed = 0;
 								}
@@ -1396,6 +1396,11 @@ const render = (now) => {
 			if(visible.has(room.index)) room.show();
 			else room.hide();
 		}
+	}
+
+	for(const room of level.rooms.values())
+	{
+		room.render(delta);
 	}
 
 	renderer.render(mainScene, camera);

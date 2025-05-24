@@ -73,6 +73,34 @@ export class Room extends EventTarget
 		this.floorMoving = false;
 
 		this.switchesFlipped = new Set;
+		this.renderCount = 0;
+	}
+
+	render(delta)
+	{
+		if(this.renderCount === 0)
+		{
+			for(const plane of [...this.middlePlanes, ...this.lowerPlanes, ...this.upperPlanes, ...this.ceilingPlanes, ...this.floorPlanes, ...this.things])
+			{
+				plane.visible=true;
+				plane.frustumCulled=false;
+			}
+		}
+
+		if(this.renderCount === 1)
+		{
+			for(const plane of [...this.middlePlanes, ...this.lowerPlanes, ...this.upperPlanes, ...this.ceilingPlanes, ...this.floorPlanes, ...this.things])
+			{
+				plane.matrixWorldAutoUpdate = false;
+				plane.matrixAutoUpdate = false;
+				plane.userData.hidden = true;
+				plane.frustumCulled=true;
+				plane.visible=false;
+				this.visible = false;
+			}
+		}
+
+		this.renderCount++;
 	}
 
 	hide()
@@ -98,9 +126,9 @@ export class Room extends EventTarget
 		{
 			plane.needsUpdate = true;
 
-			if(plane.userData.hidden)
+			if(!plane.userData.hidden)
 			{
-				// continue;
+				continue;
 			}
 
 			plane.matrixWorldAutoUpdate = true;

@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
-import { byteToLightOffset, flipVertex, isTextureName, loadTexture, textureLoader, missing, playSample, unflipVertex } from './helpers';
+import { byteToLightOffset, flipVertex, isTextureName, loadTexture, textureLoader, missing, playSample } from './helpers';
 
 export class Room extends EventTarget
 {
@@ -8,6 +8,7 @@ export class Room extends EventTarget
 	{
 		super();
 
+		this.index = sector.index;
 		this.floorHeight   = sector.floorHeight;
 		this.ceilingHeight = sector.ceilingHeight;
 
@@ -26,7 +27,6 @@ export class Room extends EventTarget
 		this.special     = sector.special;
 
 		this.tag   = sector.tag;
-		this.index = sector.index;
 
 		this.sector = sector;
 		this.level  = level;
@@ -80,24 +80,42 @@ export class Room extends EventTarget
 	{
 		if(this.renderCount === 0)
 		{
-			for(const plane of [...this.middlePlanes, ...this.lowerPlanes, ...this.upperPlanes, ...this.ceilingPlanes, ...this.floorPlanes, ...this.things])
+			for(const plane of [...this.middlePlanes, ...this.lowerPlanes, ...this.upperPlanes, ...this.ceilingPlanes, ...this.floorPlanes])
 			{
 				plane.visible=true;
 				plane.frustumCulled=false;
+			}
+
+			for(const thing of this.things)
+			{
+				if(!thing.plane) continue;
+				thing.plane.visible=true;
+				thing.plane.frustumCulled=false;
 			}
 		}
 
 		if(this.renderCount === 1)
 		{
-			for(const plane of [...this.middlePlanes, ...this.lowerPlanes, ...this.upperPlanes, ...this.ceilingPlanes, ...this.floorPlanes, ...this.things])
+			for(const plane of [...this.middlePlanes, ...this.lowerPlanes, ...this.upperPlanes, ...this.ceilingPlanes, ...this.floorPlanes])
 			{
 				plane.matrixWorldAutoUpdate = false;
 				plane.matrixAutoUpdate = false;
 				plane.userData.hidden = true;
-				plane.frustumCulled=true;
-				plane.visible=false;
-				this.visible = false;
+				plane.frustumCulled = true;
+				plane.visible = false;
 			}
+
+			for(const thing of this.things)
+			{
+				if(!thing.plane || thing.hidden) continue;
+
+				thing.plane.matrixWorldAutoUpdate = false;
+				thing.plane.matrixAutoUpdate = false;
+				thing.plane.frustumCulled = true;
+				thing.plane.visible = false;
+			}
+
+			this.visible = false;
 		}
 
 		this.renderCount++;
@@ -107,12 +125,22 @@ export class Room extends EventTarget
 	{
 		if(!this.visible) return;
 
-		for(const plane of [...this.middlePlanes, ...this.lowerPlanes, ...this.upperPlanes, ...this.ceilingPlanes, ...this.floorPlanes, ...this.things])
+		for(const plane of [...this.middlePlanes, ...this.lowerPlanes, ...this.upperPlanes, ...this.ceilingPlanes, ...this.floorPlanes])
 		{
 			plane.needsUpdate = true;
 			plane.matrixWorldAutoUpdate = false;
 			plane.matrixAutoUpdate = false;
 			plane.visible = false;
+		}
+
+		for(const thing of this.things)
+		{
+			if(!thing.plane) continue;
+
+			thing.plane.needsUpdate = true;
+			thing.plane.matrixWorldAutoUpdate = false;
+			thing.plane.matrixAutoUpdate = false;
+			thing.plane.visible = false;
 		}
 
 		this.visible = false;
@@ -122,18 +150,24 @@ export class Room extends EventTarget
 	{
 		if(this.visible) return;
 
-		for(const plane of [...this.middlePlanes, ...this.lowerPlanes, ...this.upperPlanes, ...this.ceilingPlanes, ...this.floorPlanes, ...this.things])
+		for(const plane of [...this.middlePlanes, ...this.lowerPlanes, ...this.upperPlanes, ...this.ceilingPlanes, ...this.floorPlanes])
 		{
 			plane.needsUpdate = true;
-
-			if(!plane.userData.hidden)
-			{
-				continue;
-			}
 
 			plane.matrixWorldAutoUpdate = true;
 			plane.matrixAutoUpdate = true;
 			plane.visible = true;
+		}
+
+		for(const thing of this.things)
+		{
+			if(!thing.plane || thing.hidden) continue;
+
+			thing.plane.needsUpdate = true;
+
+			thing.plane.matrixWorldAutoUpdate = true;
+			thing.plane.matrixAutoUpdate = true;
+			thing.plane.visible = true;
 		}
 
 		this.visible = true;
@@ -175,20 +209,23 @@ export class Room extends EventTarget
 			plane.material.map.needsUpdate = true;
 		}
 
-		for(const plane of [...this.things])
+		for(const thing of this.things)
 		{
+			if(!thing.plane) continue;
+
 			if(lowRes)
 			{
-				plane.material.map.minFilter = THREE.NearestFilter;
+				thing.plane.material.map.minFilter = THREE.NearestFilter;
 			}
 			else
 			{
-				plane.material.map.minFilter = THREE.NearestMipmapLinearFilter;
+				thing.plane.material.map.minFilter = THREE.NearestMipmapLinearFilter;
 			}
 
-			plane.material.map.needsUpdate = true;
+			thing.plane.material.map.needsUpdate = true;
 
-			for(const animation of plane.userData.sprite)
+			if(thing.plane.userData.sprite)
+			for(const animation of thing.plane.userData.sprite)
 			for(const frame of animation)
 			{
 				if(!frame) continue;
@@ -218,8 +255,6 @@ export class Room extends EventTarget
 		{
 			this.timer = 0;
 		}
-
-		const groundedThings = new Set;
 
 		if(this.slopedLinedef && !this.slopedAntidef)
 		{
@@ -262,7 +297,7 @@ export class Room extends EventTarget
 
 			this.slopeDist = sorted[0][1].dist;
 
-			console.log(this.slopedLinedef, slopeTo, sorted);
+			// console.log(this.slopedLinedef, slopeTo, sorted);
 
 			this.slopedAntidef = slopeTo;
 			const left = this.level.map.sidedef(this.slopedLinedef.left);
@@ -331,11 +366,6 @@ export class Room extends EventTarget
 
 		if(this.floorHeight !== this.targetFloorHeight)
 		{
-			for(const thing of this.things)
-			{
-				thing.position.y = this.floorHeight + thing.userData.height / 2;
-			}
-
 			if(Math.abs(this.targetFloorHeight - this.floorHeight) < delta * this.moveSpeed)
 			{
 				this.dispatchEvent(new CustomEvent('floor-stop', {detail: {
@@ -361,6 +391,13 @@ export class Room extends EventTarget
 				this.floorMoving = true;
 
 				this.floorHeight += delta * this.moveSpeed * Math.sign(this.targetFloorHeight - this.floorHeight);
+			}
+
+			for(const entity of this.things)
+			{
+				if(!entity.grounded) continue;
+
+				entity.position.z = this.floorHeight;
 			}
 
 			this.moveGeometry();
@@ -832,6 +869,7 @@ export class Room extends EventTarget
 
 			plane.userData.textureName = sidedef.middle;
 			plane.userData.textureHeight = middleHeight;
+			plane.userData.linedef = linedef.index;
 			plane.scale.y = middleHeight;
 			this.level.planes++;
 
@@ -886,7 +924,9 @@ export class Room extends EventTarget
 			plane.userData.lSector = lSector;
 
 			this.middlePlanes.add(plane);
+
 			if(oRoom) oRoom.middlePlanes.add(plane);
+
 			!isLeftWall
 				? this.innerPlanes.add(plane)
 				: (oRoom && oRoom.innerPlanes.add(plane));
@@ -919,6 +959,7 @@ export class Room extends EventTarget
 			plane.userData.textureName = sidedef.lower;
 			plane.userData.lowerUnpegged = lowerUnpegged;
 			plane.userData.textureHeight = lowerHeight;
+			plane.userData.linedef = linedef.index;
 			plane.userData.sector = sector;
 			plane.scale.y = lowerHeight;
 			this.level.planes++;
@@ -1008,6 +1049,7 @@ export class Room extends EventTarget
 
 			plane.userData.textureName = sidedef.upper;
 			plane.userData.textureHeight = upperHeight;
+			plane.userData.linedef = linedef.index;
 			plane.scale.y = upperHeight;
 			this.level.planes++;
 
@@ -1206,9 +1248,10 @@ export class Room extends EventTarget
 			textures.set(sector.ceilingFlat, new Map);
 		}
 
-		if(sector.floorFlat === 'GRASS1_2')
+		// if(sector.floorFlat === 'GRASS1_2')
+		if(sector.floorFlat === 'STEP1')
 		{
-			console.log(floorFlat, sector);
+			// console.log(floorFlat, floorFlat);
 		}
 
 		if(!textures.get(sector.floorFlat).has(lightLevel))
@@ -1218,10 +1261,10 @@ export class Room extends EventTarget
 			floorTexture.colorSpace = THREE.SRGBColorSpace;
 			floorTexture.wrapS = THREE.RepeatWrapping;
 			floorTexture.wrapT = THREE.RepeatWrapping;
+
 			textures.get(sector.floorFlat).set(lightLevel, floorTexture);
 
-			if(!floorFlat) console.log(sector.floorFlat);
-			if(!ceilingFlat) console.log(sector.ceilingFlat);
+			if(!floorFlat) console.log(`Missing flat: ${sector.floorFlat}`);
 		}
 
 		if(!textures.get(sector.ceilingFlat).has(lightLevel))
@@ -1231,17 +1274,20 @@ export class Room extends EventTarget
 			ceilingTexture.colorSpace = THREE.SRGBColorSpace;
 			ceilingTexture.wrapS = THREE.RepeatWrapping;
 			ceilingTexture.wrapT = THREE.RepeatWrapping;
+
 			textures.get(sector.ceilingFlat).set(lightLevel, ceilingTexture);
+
+			if(!ceilingFlat) console.log(`Missing flat: ${sector.ceilingFlat}`);
 		}
 
-		const floorTexture = textures.get(sector.floorFlat).get(lightLevel).clone();
 		const ceilingTexture = textures.get(sector.ceilingFlat).get(lightLevel).clone();
+		const floorTexture   = textures.get(sector.floorFlat).get(lightLevel).clone();
 
-		floorTexture.repeat.set(size.x / 64, size.z / 64);
 		ceilingTexture.repeat.set(size.x / 64, size.z / 64);
+		floorTexture.repeat.set(size.x / 64, size.z / 64);
 
-		const floorMaterial   = new THREE.MeshBasicMaterial({map: floorTexture,   transparent: false});
-		const ceilingMaterial = new THREE.MeshBasicMaterial({map: ceilingTexture, transparent: false});
+		const floorMaterial   = new THREE.MeshBasicMaterial({map: floorTexture});
+		const ceilingMaterial = new THREE.MeshBasicMaterial({map: ceilingTexture});
 
 		const floor   = new THREE.Mesh(floorGeometry, floorMaterial);
 		const ceiling = new THREE.Mesh(ceilingGeometry, ceilingMaterial);
@@ -1381,6 +1427,19 @@ export class Room extends EventTarget
 
 		this.level.roomThings.set(thing, this);
 		this.things.add(thing);
+	}
+
+	removeThing(thing)
+	{
+		if(this.level.roomThings.has(thing))
+		{
+			const room = this.level.roomThings.get(thing);
+			this.level.roomThings.delete(thing);
+			room.things.delete(thing);
+		}
+
+		this.level.roomThings.delete(thing);
+		this.things.delete(thing);
 	}
 
 	flipSwitch(linedef)

@@ -1,23 +1,41 @@
 import * as THREE from 'three';
 import { Room } from './Room';
-import { byteToLightOffset, flipVertex, loadTexture, textureLoader, playSample } from './helpers';
+import { loadTexture, playSample } from './helpers';
+import { Entity } from './Entity';
+import { QuadTree } from './math/QuadTree';
+import { Decorate } from './Decorate';
+
+import d1 from './mobs/doom1-enemies.dec';
+import d2 from './mobs/doom2-enemies.dec';
+import objects from './mobs/objects.dec';
+import decor from './mobs/decor.dec';
+import weaps from './mobs/weaps.dec';
+
+const decorate = new Decorate;
+
+decorate.parse(objects);
+decorate.parse(d1);
+decorate.parse(d2);
+decorate.parse(decor);
+decorate.parse(weaps);
+
+console.log(decorate);
 
 let fullbright = false;
-
 let showThings = true;
-const things = new Set;
-const thingMaterials = new Map;
-const thingGeometries = new Map;
 
 export class Level extends EventTarget
 {
-	constructor(map, wad, scene)
+	constructor(map, wad, scene, camera)
 	{
 		super();
+		this.things = new Map;
+		this.entities = new Set;
 		this.rooms = new Map;
 		this.map = map;
 		this.wad = wad;
 		this.scene = scene;
+		this.camera = camera;
 		this.animatedWalls = new Set;
 		this.animatedFlats = new Set;
 		this.tags = new Map;
@@ -25,6 +43,12 @@ export class Level extends EventTarget
 		this.roomThings = new Map;
 		this.planes = 0;
 		this.textures = new Map;
+		this.particles = new Set;
+		this.lines = new Set;
+
+		this.quadTree = new QuadTree(map.bounds.xMin, map.bounds.yMin, map.bounds.xMax, map.bounds.yMax);
+
+		console.log(this.quadTree);
 	}
 
 	async setup()
@@ -45,8 +69,8 @@ export class Level extends EventTarget
 			const rRoom   = this.rooms.get(rSector.index);
 			const lRoom   = lSector && this.rooms.get(lSector.index);
 
-			rRoom.addWall(linedef);
-			lRoom && lRoom.addWall(linedef, true);
+			await rRoom.addWall(linedef);
+			lRoom && await lRoom.addWall(linedef, true);
 		});
 
 		const loadThings = Array(this.map.thingCount).fill().map((_,k)=>k).map(async i => {
@@ -55,12 +79,6 @@ export class Level extends EventTarget
 			if(thing.flags.multip || [2,3,4,10,12,15,24].includes(thing.type)) return;
 			// if(thing.flags.multip || [2,3,4,10,12,15,116,127].includes(thing.type)) return;
 
-			if(!thing.meta)
-			{
-				return;
-			}
-
-			const spriteName = thing.meta.sprite;
 			const sector = this.map.bspPoint(thing.x, thing.y);
 			const room = this.rooms.get(sector.index);
 
@@ -70,93 +88,12 @@ export class Level extends EventTarget
 				return;
 			}
 
-			if(!spriteName || spriteName[0] === '-')
+			const className = decorate.getClass(thing.type);
+			const decDef = decorate.resolve(className);
+
+			if(decDef)
 			{
-				return;
-			}
-
-			const textures = this.textures;
-			const _sprite = this.wad.sprite(thing.meta.sprite);
-			const sprite = [];
-
-			if(_sprite && _sprite[0])
-			{
-				for(const f in _sprite)
-				for(const a in _sprite[f])
-				{
-					if(f > 0) break;
-
-					const frame = _sprite[f][a];
-
-					if(!frame) continue;
-
-					const spriteKey = thing.meta.sprite + f + a;
-
-					if(!textures.has(spriteKey))
-					{
-						textures.set(spriteKey, new Map);
-					}
-
-					if(!textures.get(spriteKey).has(sector.lightLevel))
-					{
-						const texture = textureLoader.load(await frame.picture.decode(
-							byteToLightOffset(sector.lightLevel)
-						));
-
-						textures.get(spriteKey).set(sector.lightLevel, texture);
-					}
-
-					const texture = textures.get(spriteKey).get(sector.lightLevel).clone();
-
-					sprite[f] = sprite[f] || [];
-					sprite[f][a] = texture;
-
-					texture.repeat.set(frame.flipped ? -1 : 1, 1);
-					texture.wrapS      = THREE.RepeatWrapping;
-					texture.colorSpace = THREE.SRGBColorSpace;
-					texture.magFilter  = THREE.NearestFilter;
-				}
-
-				const picture = (_sprite[0][0] || _sprite[0][1]).picture;
-				const texture = (sprite[0][0] || sprite[0][1]);
-
-				if(!thingMaterials.has(thing.meta.sprite))
-				{
-					thingMaterials.set(thing.meta.sprite, new Map);
-				}
-
-				if(!thingMaterials.get(thing.meta.sprite).has(sector.lightLevel))
-				{
-					const material = (_sprite[0][0] || _sprite[0][1]) && new THREE.MeshBasicMaterial({
-						map: texture, transparent: true
-					});
-
-					thingMaterials.get(thing.meta.sprite).set(sector.lightLevel, material);
-				}
-
-				const material = thingMaterials.get(thing.meta.sprite).get(sector.lightLevel).clone();
-
-				if(!thingGeometries.has(thing.meta.sprite))
-				{
-					thingGeometries.set(thing.meta.sprite, new THREE.PlaneGeometry(picture.width, picture.height, 1));
-				}
-				const geometry = thingGeometries.get(thing.meta.sprite);
-
-				const plane = new THREE.Mesh(geometry, material);
-				const pos   = flipVertex(this.map, thing);
-
-				plane.position.x = pos.x;
-				plane.position.z = pos.y;
-				plane.position.y = sector.floorHeight + picture.height / 2;
-				plane.rotation.y = 0;
-
-				plane.userData.thing  = thing;
-				plane.userData.sprite = sprite;
-				plane.userData.height = picture.height;
-
-				this.scene.add(plane);
-				room.addThing(plane);
-				things.add(plane);
+				await this.spawnEntity(thing.x, thing.y, thing.angle, decDef, thing);
 			}
 		});
 
@@ -171,10 +108,9 @@ export class Level extends EventTarget
 			roomSubsectors.get(room).add(subsector);
 		});
 
-		for(const [room, subsectors] of roomSubsectors)
-		{
-			room.addFlats(subsectors);
-		}
+		const loadFlats = [...roomSubsectors].map(async ([room, subsectors]) => {
+			await room.addFlats(subsectors);
+		});
 
 		const lightLevel = 0;
 
@@ -186,9 +122,7 @@ export class Level extends EventTarget
 		texture.colorSpace = THREE.SRGBColorSpace;
 		this.scene.background = texture;
 
-		await Promise.all([...loadRooms, ...loadWalls, ...loadThings]);
-
-		console.log(this.transparentPlanes, this.planes, this.map.thingCount, thingMaterials);
+		await Promise.all([...loadRooms, ...loadWalls, ...loadThings, ...loadFlats]);
 
 		for(const room of this.rooms.values())
 		{
@@ -235,6 +169,19 @@ export class Level extends EventTarget
 
 	simulate(delta, camera)
 	{
+		for(const entity of this.entities)
+		{
+			if(!entity.room.visible) continue;
+
+			entity.simulate(delta, camera);
+		}
+
+		for(const room of this.rooms.values())
+		{
+			// if(!room.visible) continue;
+			room.simulate(delta);
+		}
+
 		for(const mesh of this.animatedFlats)
 		{
 			if(!mesh.userData.frames) continue;
@@ -269,31 +216,66 @@ export class Level extends EventTarget
 			}
 		}
 
-		for(const thing of things)
+		for(const particle of this.particles)
 		{
-			const camAngle = thing.rotation.y = Math.PI + Math.atan2(
-				thing.position.x - camera.position.x,
-				thing.position.z - camera.position.z,
-			);
+			particle.simulate(delta);
+		}
 
-			const thingAngle = (Math.PI/2) + (-thing.userData.thing.angle * Math.PI) / 180;
+		for(const line of this.lines)
+		{
+			// line.material.opacity = 1 - line.userData.age / line.userData.maxAge;
+			line.material.linewidth = line.userData.originalWidth * (1 - line.userData.age / line.userData.maxAge);
+			line.material.needsUpdate = true;
 
-			const relAngle = (camAngle + thingAngle) % (Math.PI * 2);
+			line.userData.age += delta;
 
-			const roundedAngle = 1 + (4 + Math.round(relAngle / (Math.PI / 4))) % 8;
-			const sprite = thing.userData.sprite;
-			const frame = 0;
-
-			if(sprite[frame][0])
+			if(line.userData.age > line.userData.maxAge)
 			{
-				// console.log(roundedAngle, sprite[frame][0]);
-			}
-			else if(sprite[frame][roundedAngle])
-			{
-				thing.material.map = sprite[frame][roundedAngle];
-				thing.material.needsUpdate = true;
+				this.scene.remove(line);
+				this.lines.delete(line);
 			}
 		}
+	}
+
+	async spawnEntity(x, y, angle, decDef, thing = null)
+	{
+		const entity = new Entity(x, y, angle, decDef, this);
+
+		await entity.setup(this.camera);
+
+		if(entity.plane)
+		{
+			this.scene.add(entity.plane);
+		}
+
+		this.quadTree.add(entity);
+
+		if(thing)
+		{
+			this.things.set(thing.index, entity);
+		}
+
+		this.entities.add(entity);
+		const sector = this.map.bspPoint(x, y);
+		const room = this.rooms.get(sector.index);
+		room.addThing(entity);
+
+		return entity;
+	}
+
+	removeEntity(entity)
+	{
+		const room = this.rooms.get(entity.sector.index);
+		room.removeThing(entity);
+
+		this.entities.delete(entity);
+
+		if(entity.plane)
+		{
+			this.scene.remove(entity.plane);
+		}
+
+		entity.dispose();
 	}
 
 	setDetail(lowRes)
@@ -348,12 +330,15 @@ export class Level extends EventTarget
 	{
 		showThings = !showThings;
 
-		for(const plane of this.roomThings.keys())
+		for(const thing of this.entities)
 		{
-			plane.userData.hidden = !showThings;
-			plane.matrixWorldAutoUpdate = showThings;
-			plane.matrixAutoUpdate = showThings;
-			plane.visible = showThings;
+			thing.hidden = !showThings;
+
+			if(!thing.plane) continue;
+
+			thing.plane.matrixWorldAutoUpdate = showThings;
+			thing.plane.matrixAutoUpdate = showThings;
+			thing.plane.visible = showThings;
 		}
 	}
 

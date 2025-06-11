@@ -14,6 +14,13 @@ const module = {
 			}]
 		},
 		{
+			test: /\.(txt|dec|lmp)$/,
+			use: [{
+				loader: 'raw-loader',
+				// options: { minimize: true }
+			}]
+		},
+		{
 			test: /\.(WAD|PNG|JSON|ICO)$/i,
 			type: 'asset/resource'
 		}
